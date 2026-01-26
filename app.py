@@ -5,8 +5,8 @@ import plotly.express as px
 # ==================================================
 # PAGE CONFIG
 # ==================================================
-st.set_page_config(page_title="CNG Daily Dashboard", layout="wide")
-st.title("📊 CNG Station Daily Operations Dashboard")
+st.set_page_config(page_title="GCS Daily Dashboard", layout="wide")
+st.title("📊 GCS Daily Operations Dashboard")
 
 # ==================================================
 # LOAD DATA
