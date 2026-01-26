@@ -9,7 +9,7 @@ st.set_page_config(page_title="CNG Daily Dashboard", layout="wide")
 st.title("📊 CNG Station Daily Operations Dashboard")
 
 # --------------------------------------------------
-# LOAD DATA FROM GOOGLE SHEETS
+# LOAD DATA
 # --------------------------------------------------
 SHEET_ID = "1pFPzyxib9rG5dune9FgUYO91Bp1zL2StO6ftxDBPRJM"
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
@@ -17,11 +17,14 @@ CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
 raw = pd.read_csv(CSV_URL, header=2)
 
 # --------------------------------------------------
-# FIX HEADERS
+# FIX HEADER ROW
 # --------------------------------------------------
 raw.columns = raw.iloc[0]
-df = raw[1:].copy()
+df = raw.iloc[1:].copy()
 
+# --------------------------------------------------
+# CLEAN COLUMN NAMES
+# --------------------------------------------------
 df.columns = (
     df.columns.astype(str)
     .str.strip()
@@ -30,49 +33,40 @@ df.columns = (
 )
 
 # --------------------------------------------------
-# KEEP ONLY RELEVANT ROWS (SHIFTS)
+# MAKE COLUMN NAMES UNIQUE (🔥 CRITICAL FIX)
 # --------------------------------------------------
-df["SHIFT"] = df["SHIFT"].str.strip()
+df.columns = pd.io.parsers.ParserBase({'names': df.columns})._maybe_dedup_names(df.columns)
+
+# --------------------------------------------------
+# KEEP ONLY SHIFT ROWS
+# --------------------------------------------------
+df["SHIFT"] = df["SHIFT"].astype(str).str.strip()
 df = df[df["SHIFT"].isin(["A", "B", "C"])]
 
 # --------------------------------------------------
-# FIX DATE COLUMN (FORWARD FILL)
+# FIX DATE (FORWARD FILL FIRST!)
 # --------------------------------------------------
 df["DATE"] = df["DATE"].ffill()
-df["DATE"] = pd.to_datetime(df["DATE"], format="%d.%m.%y")
+df["DATE"] = pd.to_datetime(df["DATE"], dayfirst=True, errors="coerce")
+df = df.dropna(subset=["DATE"])
 
 # --------------------------------------------------
 # CLEAN NUMERIC COLUMNS
 # --------------------------------------------------
-numeric_cols = [
-    "DSR (QTY.) KG.",
-    "TOTAL DSR QTY. KG",
-    "LCV (QTY.) KG",
-    "CREDIT SALE (QTY.) KG",
-    "CREDIT SALE (RS.)",
-    "TOTAL AMOUNT RTGS PAID",
-    "ATM",
-    "PAYTM",
-    "CASH DEPOSIIT IN BANK",
-    "SHORT AMOUNT",
-    "EXPENSES",
-    "FILLING BOY"
-]
-
-for col in numeric_cols:
-    if col in df.columns:
+for col in df.columns:
+    if col not in ["DATE", "SHIFT"]:
         df[col] = (
             df[col]
             .astype(str)
             .str.replace(",", "", regex=False)
-            .replace("nan", "0")
-            .astype(float)
+            .str.replace("nan", "0")
         )
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
 # --------------------------------------------------
-# AGGREGATE PER DAY
+# AGGREGATE PER DAY (THIS FIXES MISSING DATES)
 # --------------------------------------------------
-daily = df.groupby("DATE", as_index=False).sum()
+daily = df.groupby("DATE", as_index=False).sum(numeric_only=True)
 
 # --------------------------------------------------
 # SIDEBAR FILTER
@@ -90,42 +84,51 @@ daily = daily[
 ]
 
 # --------------------------------------------------
-# KPIs
+# KPI MAPPING (SAFE)
+# --------------------------------------------------
+def safe(col):
+    return daily[col].sum() if col in daily.columns else 0
+
+# --------------------------------------------------
+# KPI CARDS
 # --------------------------------------------------
 k1, k2, k3, k4, k5, k6 = st.columns(6)
 
-k1.metric("🔥 Total Gas Sold (KG)", f"{daily['TOTAL DSR QTY. KG'].sum():,.0f}")
-k2.metric("💰 Credit Sales (₹)", f"{daily['CREDIT SALE (RS.)'].sum():,.0f}")
-k3.metric("💳 Paytm (₹)", f"{daily['PAYTM'].sum():,.0f}")
-k4.metric("🏦 Cash Deposited (₹)", f"{daily['CASH DEPOSIIT IN BANK'].sum():,.0f}")
-k5.metric("💸 Expenses (₹)", f"{daily['EXPENSES'].sum():,.0f}")
-k6.metric("⚠️ Short Amount (₹)", f"{daily['SHORT AMOUNT'].sum():,.0f}")
+k1.metric("🔥 Total Gas Sold (KG)", f"{safe('TOTAL DSR QTY. KG'):,.0f}")
+k2.metric("💳 Credit Sales (₹)", f"{safe('CREDIT SALE (RS.)'):,.0f}")
+k3.metric("💰 Paytm (₹)", f"{safe('PAYTM'):,.0f}")
+k4.metric("🏦 Cash Deposited (₹)", f"{safe('CASH DEPOSIIT IN BANK'):,.0f}")
+k5.metric("💸 Expenses (₹)", f"{safe('EXPENSES'):,.0f}")
+k6.metric("⚠️ Short Amount (₹)", f"{safe('SHORT AMOUNT'):,.0f}")
 
 st.divider()
 
 # --------------------------------------------------
-# DAILY SALES TREND
+# DAILY SALES TREND (NO DUPLICATES NOW)
 # --------------------------------------------------
-fig_qty = px.line(
-    daily,
-    x="DATE",
-    y="TOTAL DSR QTY. KG",
-    markers=True,
-    title="Daily Gas Sales (KG)"
-)
-st.plotly_chart(fig_qty, use_container_width=True)
+if "TOTAL DSR QTY. KG" in daily.columns:
+    fig_qty = px.line(
+        daily,
+        x="DATE",
+        y="TOTAL DSR QTY. KG",
+        markers=True,
+        title="Daily Gas Sales (KG)"
+    )
+    st.plotly_chart(fig_qty, use_container_width=True)
 
 # --------------------------------------------------
-# PAYMENT MODE BREAKDOWN
+# PAYMENT MODE SPLIT
 # --------------------------------------------------
 payment_df = pd.DataFrame({
     "Mode": ["ATM", "Paytm", "Cash Deposit"],
     "Amount": [
-        daily["ATM"].sum(),
-        daily["PAYTM"].sum(),
-        daily["CASH DEPOSIIT IN BANK"].sum()
+        safe("ATM"),
+        safe("PAYTM"),
+        safe("CASH DEPOSIIT IN BANK")
     ]
 })
+
+payment_df = payment_df[payment_df["Amount"] > 0]
 
 fig_pay = px.pie(payment_df, names="Mode", values="Amount", title="Payment Mode Split")
 st.plotly_chart(fig_pay, use_container_width=True)
@@ -136,9 +139,9 @@ st.plotly_chart(fig_pay, use_container_width=True)
 cash_df = pd.DataFrame({
     "Type": ["Cash Deposit", "Expenses", "Short Amount"],
     "Amount": [
-        daily["CASH DEPOSIIT IN BANK"].sum(),
-        daily["EXPENSES"].sum(),
-        daily["SHORT AMOUNT"].sum()
+        safe("CASH DEPOSIIT IN BANK"),
+        safe("EXPENSES"),
+        safe("SHORT AMOUNT")
     ]
 })
 
@@ -148,5 +151,5 @@ st.plotly_chart(fig_cash, use_container_width=True)
 # --------------------------------------------------
 # RAW DATA
 # --------------------------------------------------
-st.subheader("📄 Daily Aggregated Data")
+st.subheader("📄 Cleaned Daily Data")
 st.dataframe(daily, use_container_width=True)
