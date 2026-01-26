@@ -5,8 +5,8 @@ import plotly.express as px
 # ==================================================
 # PAGE CONFIG
 # ==================================================
-st.set_page_config(page_title="CNG Daily Dashboard", layout="wide")
-st.title("📊 CNG Station Daily Operations Dashboard")
+st.set_page_config(page_title="GCS Daily Dashboard", layout="wide")
+st.title("📊 GCS Daily Operations Dashboard")
 
 # ==================================================
 # LOAD DATA
@@ -22,7 +22,7 @@ raw.columns = raw.iloc[0]
 df = raw.iloc[1:].copy()
 
 # ==================================================
-# CLEAN COLUMN NAMES
+# CLEAN COLUMNS
 # ==================================================
 df.columns = (
     df.columns.astype(str)
@@ -31,7 +31,6 @@ df.columns = (
     .str.replace("\n", " ")
 )
 
-# Make column names unique
 def make_unique(cols):
     seen = {}
     out = []
@@ -47,17 +46,9 @@ def make_unique(cols):
 df.columns = make_unique(df.columns)
 
 # ==================================================
-# IDENTIFY DATE & SHIFT COLUMNS (IMPORTANT FIX)
+# SHIFT + DATE CLEANING
 # ==================================================
-date_col = df.columns[0]      # First column = DATE
-shift_col = df.columns[1]     # Second column = A / B / C
-
-df.rename(columns={date_col: "DATE", shift_col: "SHIFT"}, inplace=True)
-
-# ==================================================
-# DATE & SHIFT CLEANING
-# ==================================================
-df["SHIFT"] = df["SHIFT"].astype(str).str.strip().str.upper()
+df["SHIFT"] = df["SHIFT"].astype(str).str.strip()
 df = df[df["SHIFT"].isin(["A", "B", "C"])]
 
 df["DATE"] = df["DATE"].ffill()
@@ -70,35 +61,53 @@ df = df.dropna(subset=["DATE"])
 for c in df.columns:
     if c not in ["DATE", "SHIFT"]:
         df[c] = (
-            df[c]
-            .astype(str)
+            df[c].astype(str)
             .str.replace(",", "", regex=False)
             .replace("nan", "0")
         )
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
 # ==================================================
-# SIDEBAR FILTER (RAW LEVEL)
+# SIDEBAR FILTER (RAW DATA LEVEL)
 # ==================================================
 st.sidebar.header("🔎 Filters")
 
+min_date = df["DATE"].min()
+max_date = df["DATE"].max()
+
 date_range = st.sidebar.date_input(
     "Select Date Range",
-    [df["DATE"].min(), df["DATE"].max()]
+    [min_date, max_date]
 )
 
-df_f = df[
+# 🔥 FILTER RAW DATA FIRST
+df_filtered = df[
     (df["DATE"] >= pd.to_datetime(date_range[0])) &
     (df["DATE"] <= pd.to_datetime(date_range[1]))
 ]
 
 # ==================================================
-# DAILY AGGREGATION (DO NOT CHANGE)
+# DAILY AGGREGATION (FILTERED)
 # ==================================================
-daily = df_f.groupby("DATE", as_index=False).sum(numeric_only=True)
+daily = df_filtered.groupby("DATE", as_index=False).sum(numeric_only=True)
 
 def safe(col):
     return daily[col].sum() if col in daily.columns else 0
+
+# ==================================================
+# TARGET
+# ==================================================
+st.sidebar.divider()
+target = st.sidebar.number_input("Daily Target (KG)", min_value=0, value=1000)
+
+actual = safe("TOTAL DSR QTY. KG")
+achievement = (actual / target * 100) if target > 0 else 0
+
+st.sidebar.metric(
+    "Target Achievement",
+    f"{achievement:.1f}%",
+    f"{actual - target:.0f} KG"
+)
 
 # ==================================================
 # KPI CARDS
@@ -106,11 +115,11 @@ def safe(col):
 k1, k2, k3, k4, k5, k6 = st.columns(6)
 
 k1.metric("🔥 Gas Sold (KG)", f"{safe('TOTAL DSR QTY. KG'):,.0f}")
-k2.metric("💳 Credit Sales (₹)", f"{safe('CREDIT SALE (RS.)'):,.0f}")
+k2.metric("💳 Credit (₹)", f"{safe('CREDIT SALE (RS.)'):,.0f}")
 k3.metric("💰 Paytm (₹)", f"{safe('PAYTM'):,.0f}")
-k4.metric("🏦 Cash Deposit (₹)", f"{safe('CASH DEPOSIIT IN BANK'):,.0f}")
+k4.metric("🏦 Bank Deposit (₹)", f"{safe('CASH DEPOSIIT IN BANK'):,.0f}")
 k5.metric("💸 Expenses (₹)", f"{safe('EXPENSES'):,.0f}")
-k6.metric("⚠️ Short Amount (₹)", f"{safe('SHORT AMOUNT'):,.0f}")
+k6.metric("⚠️ Short (₹)", f"{safe('SHORT AMOUNT'):,.0f}")
 
 st.divider()
 
@@ -121,11 +130,12 @@ tabs = st.tabs([
     "📈 Daily Overview",
     "🔄 Shift Analysis",
     "📅 Monthly Summary",
-    "📄 Raw Data"
+    "🚨 Alerts",
+    "📄 Data"
 ])
 
 # ==================================================
-# TAB 1: DAILY OVERVIEW (UNCHANGED)
+# DAILY OVERVIEW
 # ==================================================
 with tabs[0]:
     fig = px.line(
@@ -138,11 +148,12 @@ with tabs[0]:
     st.plotly_chart(fig, use_container_width=True)
 
 # ==================================================
-# TAB 2: ✅ CORRECT SHIFT ANALYSIS
+# ✅ FIXED SHIFT ANALYSIS
 # ==================================================
 with tabs[1]:
+    # DAILY + SHIFT (FILTERED)
     shift_daily = (
-        df_f
+        df_filtered
         .groupby(["DATE", "SHIFT"], as_index=False)
         .sum(numeric_only=True)
     )
@@ -157,33 +168,23 @@ with tabs[1]:
     )
     st.plotly_chart(fig_shift, use_container_width=True)
 
-    # ------------------------------
-    # SHIFT-WISE CASH & PAYMENTS
-    # ------------------------------
-    cash_cols = [
-        c for c in shift_daily.columns
-        if any(k in c for k in ["CASH", "PAYTM", "ATM", "RTGS", "PID"])
-    ]
+    # TOTAL BY SHIFT
+    shift_total = (
+        df_filtered
+        .groupby("SHIFT", as_index=False)
+        .sum(numeric_only=True)
+    )
 
-    if cash_cols:
-        cash_shift = (
-            df_f
-            .groupby("SHIFT", as_index=False)[cash_cols]
-            .sum()
-        )
-
-        fig_cash = px.bar(
-            cash_shift.melt(id_vars="SHIFT", var_name="Mode", value_name="Amount"),
-            x="SHIFT",
-            y="Amount",
-            color="Mode",
-            title="Shift-wise Cash / Digital Collection",
-            barmode="stack"
-        )
-        st.plotly_chart(fig_cash, use_container_width=True)
+    fig_shift_total = px.pie(
+        shift_total,
+        names="SHIFT",
+        values="TOTAL DSR QTY. KG",
+        title="Total Contribution by Shift"
+    )
+    st.plotly_chart(fig_shift_total, use_container_width=True)
 
 # ==================================================
-# TAB 3: MONTHLY SUMMARY
+# MONTHLY SUMMARY
 # ==================================================
 with tabs[2]:
     daily["MONTH"] = daily["DATE"].dt.to_period("M").astype(str)
@@ -191,7 +192,16 @@ with tabs[2]:
     st.dataframe(monthly, use_container_width=True)
 
 # ==================================================
-# TAB 4: RAW DATA
+# ALERTS
 # ==================================================
 with tabs[3]:
-    st.dataframe(df_f, use_container_width=True)
+    if safe("SHORT AMOUNT") > 0:
+        st.error(f"🚨 Short Amount: ₹{safe('SHORT AMOUNT'):,.0f}")
+    else:
+        st.success("✅ No Short Amount")
+
+# ==================================================
+# DATA VIEW
+# ==================================================
+with tabs[4]:
+    st.dataframe(df_filtered, use_container_width=True)
