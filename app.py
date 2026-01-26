@@ -33,9 +33,21 @@ df.columns = (
 )
 
 # --------------------------------------------------
-# MAKE COLUMN NAMES UNIQUE (🔥 CRITICAL FIX)
+# MAKE COLUMN NAMES UNIQUE (PANDAS-SAFE)
 # --------------------------------------------------
-df.columns = pd.io.parsers.ParserBase({'names': df.columns})._maybe_dedup_names(df.columns)
+def make_unique(cols):
+    seen = {}
+    new_cols = []
+    for col in cols:
+        if col not in seen:
+            seen[col] = 0
+            new_cols.append(col)
+        else:
+            seen[col] += 1
+            new_cols.append(f"{col}_{seen[col]}")
+    return new_cols
+
+df.columns = make_unique(df.columns)
 
 # --------------------------------------------------
 # KEEP ONLY SHIFT ROWS
@@ -44,7 +56,7 @@ df["SHIFT"] = df["SHIFT"].astype(str).str.strip()
 df = df[df["SHIFT"].isin(["A", "B", "C"])]
 
 # --------------------------------------------------
-# FIX DATE (FORWARD FILL FIRST!)
+# FIX DATE (FORWARD FILL FIRST)
 # --------------------------------------------------
 df["DATE"] = df["DATE"].ffill()
 df["DATE"] = pd.to_datetime(df["DATE"], dayfirst=True, errors="coerce")
@@ -59,12 +71,12 @@ for col in df.columns:
             df[col]
             .astype(str)
             .str.replace(",", "", regex=False)
-            .str.replace("nan", "0")
+            .replace("nan", "0")
         )
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
 # --------------------------------------------------
-# AGGREGATE PER DAY (THIS FIXES MISSING DATES)
+# AGGREGATE PER DAY (FIXES MISSING DATES)
 # --------------------------------------------------
 daily = df.groupby("DATE", as_index=False).sum(numeric_only=True)
 
@@ -84,7 +96,7 @@ daily = daily[
 ]
 
 # --------------------------------------------------
-# KPI MAPPING (SAFE)
+# SAFE SUM FUNCTION
 # --------------------------------------------------
 def safe(col):
     return daily[col].sum() if col in daily.columns else 0
@@ -104,7 +116,7 @@ k6.metric("⚠️ Short Amount (₹)", f"{safe('SHORT AMOUNT'):,.0f}")
 st.divider()
 
 # --------------------------------------------------
-# DAILY SALES TREND (NO DUPLICATES NOW)
+# DAILY SALES TREND
 # --------------------------------------------------
 if "TOTAL DSR QTY. KG" in daily.columns:
     fig_qty = px.line(
