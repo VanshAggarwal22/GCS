@@ -1,198 +1,150 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import requests
+import re
 
-# ==========================
+# -------------------------
 # CONFIG
-# ==========================
-st.set_page_config(
-    page_title="Fuel Station Daily Dashboard",
-    layout="wide"
-)
+# -------------------------
+st.set_page_config(page_title="Gas Sales Dashboard", layout="wide")
+GOOGLE_SHEET_ID = "1_NDdrYnUJnFoJHwc5pZUy5bM920UqMmxP2dUJErGtNA"
 
-SHEET_ID = "1_NDdrYnUJnFoJHwc5dZUy5bM920UqMmxP2dUJErGtNA"
+# -------------------------
+# HELPER FUNCTIONS
+# -------------------------
 
-# Map each sheet name to its GID
-sheet_gids = {
-    "01.01.26": "0",
-    "02.01.26": "123456789",
-    "03.01.26": "234567890",
-    # Add all your tabs here
-}
+# Get all GIDs from the Google Sheet
+@st.cache_data(show_spinner=False)
+def get_all_gids(sheet_id):
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?&tqx=out:json"
+    res = requests.get(url).text
+    gids = re.findall(r"gid\":(\d+)", res)
+    return list(set(gids))
 
-# ==========================
-# GOOGLE SHEET FETCH
-# ==========================
-@st.cache_data
-def load_sheet(sheet_gid: str) -> pd.DataFrame:
-    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={sheet_gid}"
-    df = pd.read_csv(url, header=None)
-    return df
-
-# ==========================
-# HELPERS
-# ==========================
-def safe_value(df, r, c):
+# Load sheet, slice only rows 7-14 and columns AA-AI
+def load_sheet_metrics(sheet_id, gid):
+    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
     try:
-        return df.iloc[r, c]
-    except:
-        return None
+        df = pd.read_csv(csv_url, header=None)
+    except Exception as e:
+        st.warning(f"Could not load GID {gid}: {e}")
+        return pd.DataFrame()
 
-def section_header(title):
-    st.markdown(f"""
-    <div style="padding:10px 0px">
-        <h3>{title}</h3>
-    </div>
-    """, unsafe_allow_html=True)
+    # Slice rows 7-14 (zero-indexed 6:14) and columns AA-AI (zero-indexed 26:35)
+    df_slice = df.iloc[6:14, 26:35]
 
-# ==========================
-# SIDEBAR
-# ==========================
-st.sidebar.title("📅 Select Date (Sheet)")
-selected_sheet = st.sidebar.selectbox("Available Dates", list(sheet_gids.keys()))
+    # Assign column names
+    columns = ["SHIFT", "QTY", "SALE_AMOUNT", "CASH", "PAYTM", "ATM",
+               "CREDIT_SALE", "TOTAL_COLLECTION", "DIFF"]
+    df_slice.columns = columns
 
-df = load_sheet(sheet_gids[selected_sheet])
+    # Drop empty rows
+    df_slice = df_slice.dropna(how="all", subset=columns)
 
-# ==========================
-# HEADER INFO
-# ==========================
-station_name = safe_value(df, 0, 0)  # Adjust row/col as needed
-date_value = selected_sheet
+    # Forward-fill SHIFT
+    df_slice["SHIFT"] = df_slice["SHIFT"].ffill()
 
-st.title("⛽ Fuel Station Daily Performance Dashboard")
-st.caption(f"📍 {station_name} | 📆 {date_value}")
+    # Convert numeric columns
+    num_cols = ["QTY", "SALE_AMOUNT", "CASH", "PAYTM", "ATM", "CREDIT_SALE",
+                "TOTAL_COLLECTION", "DIFF"]
+    for c in num_cols:
+        df_slice[c] = df_slice[c].astype(str).str.replace(",", "").astype(float)
 
-# ==========================
-# KPI CARDS
-# ==========================
-k1, k2, k3, k4 = st.columns(4)
+    # Mark TOTAL rows
+    df_slice["IS_TOTAL"] = df_slice["SHIFT"].str.contains("TOTAL", case=False)
 
-total_sale = safe_value(df, 5, 5)
-total_qty = safe_value(df, 5, 3)
-total_collection = safe_value(df, 18, 5)
-difference = safe_value(df, 18, 6)
+    return df_slice
 
-k1.metric("💰 Total Sale (₹)", total_sale)
-k2.metric("⚖️ Total Quantity (Kg)", total_qty)
-k3.metric("💵 Total Collection", total_collection)
-k4.metric("⚠️ Difference", difference)
+# Load all sheets
+@st.cache_data(show_spinner=False)
+def load_all_sheets(sheet_id):
+    gids = get_all_gids(sheet_id)
+    df_list = []
+    for gid in gids:
+        df_sheet = load_sheet_metrics(sheet_id, gid)
+        if not df_sheet.empty:
+            df_list.append(df_sheet)
+    if df_list:
+        return pd.concat(df_list, ignore_index=True)
+    else:
+        return pd.DataFrame()
 
-st.divider()
+# -------------------------
+# LOAD DATA
+# -------------------------
+df = load_all_sheets(GOOGLE_SHEET_ID)
 
-# ==========================
-# SHIFT-WISE SUMMARY
-# ==========================
-section_header("🕒 Shift-wise Summary")
+if df.empty:
+    st.error("❌ No metrics found in the specified range across all sheets.")
+    st.stop()
 
-shift_data = pd.DataFrame({
-    "Shift": ["A", "B", "C"],
-    "Quantity": [
-        safe_value(df, 7, 3),
-        safe_value(df, 10, 3),
-        safe_value(df, 13, 3)
-    ],
-    "Sale": [
-        safe_value(df, 7, 5),
-        safe_value(df, 10, 5),
-        safe_value(df, 13, 5)
-    ],
-    "Difference": [
-        safe_value(df, 7, 6),
-        safe_value(df, 10, 6),
-        safe_value(df, 13, 6)
-    ]
-})
+# -------------------------
+# SIDEBAR FILTERS
+# -------------------------
+shift_options = df["SHIFT"].unique().tolist()
+selected_shifts = st.sidebar.multiselect("Select Shifts", options=shift_options, default=shift_options)
+fdf = df[df["SHIFT"].isin(selected_shifts)]
 
-c1, c2 = st.columns(2)
+# -------------------------
+# DASHBOARD TABS
+# -------------------------
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 Shift-wise QTY & Sales",
+    "💰 Payment Breakdown",
+    "📈 Total Collection vs Diff",
+    "📋 Raw Data"
+])
 
-with c1:
-    st.dataframe(shift_data, use_container_width=True)
-
-with c2:
-    fig = px.bar(
-        shift_data,
-        x="Shift",
-        y="Sale",
-        title="Shift-wise Sale Distribution",
-        text_auto=True
+# -------------------------
+# TAB 1: SHIFT-wise QTY & Sales
+# -------------------------
+with tab1:
+    st.subheader("Shift-wise Quantity & Sales")
+    fig1 = px.bar(
+        fdf,
+        x="SHIFT",
+        y=["QTY", "SALE_AMOUNT"],
+        barmode="group",
+        text_auto=True,
+        title="Shift-wise Gas Quantity and Sale Amount"
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig1, use_container_width=True)
 
-st.divider()
-
-# ==========================
-# PAYMENT MODE BREAKUP
-# ==========================
-section_header("💳 Payment Mode Breakdown")
-
-payment_df = pd.DataFrame({
-    "Mode": ["Cash", "Paytm", "ATM", "Credit"],
-    "Amount": [
-        safe_value(df, 16, 5),
-        safe_value(df, 15, 5),
-        safe_value(df, 14, 5),
-        safe_value(df, 17, 5)
-    ]
-})
-
-c1, c2 = st.columns(2)
-
-with c1:
-    st.dataframe(payment_df, use_container_width=True)
-
-with c2:
-    fig = px.pie(
-        payment_df,
-        names="Mode",
-        values="Amount",
-        title="Payment Mode Contribution"
+# -------------------------
+# TAB 2: PAYMENT BREAKDOWN
+# -------------------------
+with tab2:
+    st.subheader("Payment Method Breakdown")
+    payment_cols = ["CASH", "PAYTM", "ATM", "CREDIT_SALE"]
+    fig2 = px.bar(
+        fdf,
+        x="SHIFT",
+        y=payment_cols,
+        barmode="stack",
+        text_auto=True,
+        title="Shift-wise Payment Methods"
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig2, use_container_width=True)
 
-st.divider()
-
-# ==========================
-# DISPENSER-WISE ANALYSIS
-# ==========================
-section_header("⛽ Dispenser-wise Analysis (Shift A Example)")
-
-dispenser_data = []
-
-start_row = 21  # Adjust based on your sheet layout
-for i in range(start_row, start_row + 10):
-    if pd.isna(safe_value(df, i, 0)):
-        break
-    dispenser_data.append({
-        "Dispenser": safe_value(df, i, 0),
-        "Opening": safe_value(df, i, 1),
-        "Closing": safe_value(df, i, 2),
-        "Quantity": safe_value(df, i, 3),
-        "Sale": safe_value(df, i, 5)
-    })
-
-disp_df = pd.DataFrame(dispenser_data)
-
-c1, c2 = st.columns(2)
-
-with c1:
-    st.dataframe(disp_df, use_container_width=True)
-
-with c2:
-    fig = px.line(
-        disp_df,
-        x="Dispenser",
-        y="Quantity",
-        markers=True,
-        title="Dispenser Consumption Trend"
+# -------------------------
+# TAB 3: TOTAL COLLECTION vs DIFF
+# -------------------------
+with tab3:
+    st.subheader("Total Collection vs Difference")
+    fig3 = px.bar(
+        fdf,
+        x="SHIFT",
+        y=["TOTAL_COLLECTION", "DIFF"],
+        barmode="group",
+        text_auto=True,
+        title="Shift-wise Total Collection vs Difference"
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig3, use_container_width=True)
 
-st.divider()
-
-# ==========================
-# RAW DATA (FOR VERIFICATION)
-# ==========================
-with st.expander("🔍 View Raw Sheet Data"):
-    st.dataframe(df, use_container_width=True)
-
-st.caption("Live data fetched directly from Google Sheets • Streamlit Dashboard")
+# -------------------------
+# TAB 4: RAW DATA
+# -------------------------
+with tab4:
+    st.subheader("Raw Extracted Data")
+    st.dataframe(fdf, use_container_width=True)
