@@ -190,7 +190,7 @@ def extract_sheet_summary(sheet_df, sheet_name):
 with tabs[2]:
     st.subheader("📊 Sheet-wise Daily Analytics")
 
-    excel_path = "/mnt/data/JANUARY-2026.xlsx"
+    excel_path = "https://docs.google.com/spreadsheets/d/1_NDdrYnUJnFoJHwc5pZUy5bM920UqMmxP2dUJErGtNA/edit?gid=1671830441#gid=1671830441"
     xls = pd.ExcelFile(excel_path)
 
     rows = []
