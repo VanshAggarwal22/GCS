@@ -1,215 +1,203 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import re
+from datetime import date
 
-st.set_page_config(page_title="Daily Operations Dashboard", layout="wide")
+# -------------------------
+# CONFIG
+# -------------------------
+st.set_page_config(page_title="Gas Sales Dashboard", layout="wide")
 
-# =====================================================
-# GOOGLE SHEET CONFIG
-# =====================================================
-SHEET_ID = "1_NDdrYnUJnFoJHwc5pZUy5bM920UqMmxP2dUJErGtNA"
+GOOGLE_SHEET_ID = "1_NDdrYnUJnFoJHwc5pZUy5bM920UqMmxP2dUJErGtNA"
 GID = "1671830441"
-CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
 
-# =====================================================
-# SAFE COLUMN DEDUPLICATION
-# =====================================================
-def dedup_columns(cols):
-    seen = {}
-    new_cols = []
-    for c in cols:
-        if c not in seen:
-            seen[c] = 0
-            new_cols.append(c)
-        else:
-            seen[c] += 1
-            new_cols.append(f"{c}_{seen[c]}")
-    return new_cols
+CSV_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv&gid={GID}"
 
-# =====================================================
-# LOAD & CLEAN DATA (AUTO HEADER + ALL DATES)
-# =====================================================
+# -------------------------
+# DATA LOADER
+# -------------------------
 @st.cache_data(show_spinner=False)
 def load_data():
-    raw = pd.read_csv(CSV_URL, header=None)
+    df = pd.read_csv(CSV_URL, header=None)
 
-    # Auto-detect header row
-    header_row = None
-    for i in range(len(raw)):
-        row = raw.iloc[i].astype(str).str.upper().tolist()
-        if any("DATE" in v or "DAY" in v for v in row):
-            header_row = i
-            break
+    # Drop fully empty rows
+    df.dropna(how="all", inplace=True)
 
-    if header_row is None:
-        st.error("❌ Could not detect header row")
-        st.stop()
+    # Assume header row is the first non-empty row
+    header_row_idx = df.notna().all(axis=1).idxmax()
+    headers = df.loc[header_row_idx].astype(str).str.strip()
+    df = df.loc[header_row_idx + 1:]
+    df.columns = headers
 
-    raw.columns = raw.iloc[header_row]
-    df = raw.iloc[header_row + 1:].copy()
+    # De-duplicate column names
+    df.columns = pd.Index(pd.io.parsers.ParserBase({"names": df.columns})._maybe_dedup_names(df.columns))
 
-    # Normalize column names
-    df.columns = (
-        df.columns.astype(str)
-        .str.strip()
-        .str.upper()
-        .str.replace(" ", "_")
-        .str.replace("/", "_")
-    )
+    # Strip spaces
+    df.columns = df.columns.str.upper().str.strip()
 
-    df.columns = dedup_columns(df.columns)
-    df = df.dropna(how="all")
-
-    # DATE = first column
-    df["DATE"] = pd.to_datetime(df.iloc[:, 0], errors="coerce")
-
-    # SHIFT = second column
-    df["SHIFT"] = df.iloc[:, 1].astype(str).str.strip()
-
-    # Convert everything else numeric
-    for col in df.columns[2:]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
-    df = df.dropna(subset=["DATE"])
-    return df
+    return df.reset_index(drop=True)
 
 df = load_data()
 
-# =====================================================
-# SMART COLUMN MAPPING (THIS IS THE KEY FIX)
-# =====================================================
-COLUMN_GROUPS = {
-    "CASH": ["CASH"],
-    "RTGS": ["RTGS", "NEFT", "ONLINE", "BANK", "DIGITAL"],
-    "PID": ["PID"],
-    "TOTAL": ["TOTAL", "GRAND"]
+# -------------------------
+# COLUMN DETECTION
+# -------------------------
+def find_col(patterns):
+    for col in df.columns:
+        for p in patterns:
+            if re.search(p, col):
+                return col
+    return None
+
+DATE_COL = find_col([r"DATE"])
+SHIFT_COL = find_col([r"SHIFT", r"A/B/C"])
+QTY_COL = find_col([r"QTY", r"KG"])
+CASH_COL = find_col([r"CASH"])
+RTGS_COL = find_col([r"RTGS"])
+PID_COL = find_col([r"PID"])
+
+required = {
+    "DATE": DATE_COL,
+    "SHIFT": SHIFT_COL,
+    "QTY": QTY_COL
 }
 
-def resolve_column(group_name):
-    keywords = COLUMN_GROUPS[group_name]
-    for col in df.columns:
-        for key in keywords:
-            if key in col:
-                return col
-    # If not found, create safe zero column
-    df[group_name] = 0
-    return group_name
+missing = [k for k, v in required.items() if v is None]
+if missing:
+    st.error(f"❌ Missing required columns: {missing}")
+    st.stop()
 
-CASH_COL = resolve_column("CASH")
-RTGS_COL = resolve_column("RTGS")
-PID_COL = resolve_column("PID")
-TOTAL_COL = resolve_column("TOTAL")
+# -------------------------
+# CLEAN DATA
+# -------------------------
+df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
+df = df.dropna(subset=[DATE_COL])
 
-DISP_COLS = [c for c in df.columns if "DISP" in c or "NOZZLE" in c]
+if df.empty:
+    st.error("❌ No valid DATE values found.")
+    st.stop()
 
-# =====================================================
-# SIDEBAR FILTERS
-# =====================================================
-st.sidebar.title("Filters")
+# Normalize shifts
+df[SHIFT_COL] = df[SHIFT_COL].astype(str).str.upper().str.strip()
 
-min_date = df["DATE"].min()
-max_date = df["DATE"].max()
+# Convert numerics safely
+for c in [QTY_COL, CASH_COL, RTGS_COL, PID_COL]:
+    if c:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+# -------------------------
+# SIDEBAR FILTERS (SAFE)
+# -------------------------
+min_date = df[DATE_COL].min().date()
+max_date = df[DATE_COL].max().date()
 
 date_range = st.sidebar.date_input(
     "Date Range",
-    [min_date, max_date],
+    value=(min_date, max_date),
     min_value=min_date,
     max_value=max_date
 )
 
-shift_options = sorted(df["SHIFT"].unique())
+if len(date_range) != 2:
+    st.stop()
 
-selected_shifts = st.sidebar.multiselect(
-    "Shifts",
-    shift_options,
-    default=shift_options
+start_date, end_date = date_range
+
+mask = (
+    (df[DATE_COL].dt.date >= start_date) &
+    (df[DATE_COL].dt.date <= end_date)
 )
+fdf = df.loc[mask].copy()
 
-filtered_df = df[
-    (df["DATE"] >= pd.to_datetime(date_range[0])) &
-    (df["DATE"] <= pd.to_datetime(date_range[1])) &
-    (df["SHIFT"].isin(selected_shifts))
-]
-
-# =====================================================
+# -------------------------
 # TABS
-# =====================================================
-tab1, tab2, tab3, tab4 = st.tabs([
+# -------------------------
+tab1, tab2, tab3 = st.tabs([
     "📊 Daily Overview",
     "🔁 Shift-wise Analysis",
-    "📅 Daily Metrics",
-    "⛽ Dispenser Trend"
+    "📅 Daily Metrics"
 ])
 
-# =====================================================
-# TAB 1 — DAILY OVERVIEW (SAFE)
-# =====================================================
+# =========================
+# TAB 1 — DAILY OVERVIEW (UNCHANGED LOGIC)
+# =========================
 with tab1:
-    daily = filtered_df.groupby("DATE", as_index=False).agg({
-        CASH_COL: "sum",
-        RTGS_COL: "sum",
-        PID_COL: "sum",
-        TOTAL_COL: "sum"
-    })
+    st.subheader("Daily Gas Sales")
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Cash", f"₹ {daily[CASH_COL].sum():,.0f}")
-    c2.metric("RTGS / Online", f"₹ {daily[RTGS_COL].sum():,.0f}")
-    c3.metric("PID", f"₹ {daily[PID_COL].sum():,.0f}")
-    c4.metric("Total", f"₹ {daily[TOTAL_COL].sum():,.0f}")
+    daily = fdf.groupby(fdf[DATE_COL].dt.date).agg(
+        TOTAL_QTY=(QTY_COL, "sum"),
+        TOTAL_CASH=(CASH_COL, "sum") if CASH_COL else ("DATE", "count"),
+        TOTAL_RTGS=(RTGS_COL, "sum") if RTGS_COL else ("DATE", "count"),
+        TOTAL_PID=(PID_COL, "sum") if PID_COL else ("DATE", "count"),
+    ).reset_index().rename(columns={DATE_COL: "DATE"})
+
+    fig = px.line(
+        daily,
+        x="DATE",
+        y="TOTAL_QTY",
+        markers=True,
+        title="Daily Gas Sales (KG)"
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
     st.dataframe(daily, use_container_width=True)
 
-# =====================================================
-# TAB 2 — SHIFT-WISE (CORRECT)
-# =====================================================
+# =========================
+# TAB 2 — SHIFT-WISE ANALYSIS (FIXED)
+# =========================
 with tab2:
-    shift_daily = filtered_df.groupby(["DATE", "SHIFT"], as_index=False).agg({
-        CASH_COL: "sum",
-        RTGS_COL: "sum",
-        PID_COL: "sum",
-        TOTAL_COL: "sum"
-    })
+    st.subheader("Shift-wise Performance")
+
+    shift_daily = fdf.groupby(
+        [fdf[DATE_COL].dt.date, SHIFT_COL]
+    ).agg(
+        QTY=(QTY_COL, "sum"),
+        CASH=(CASH_COL, "sum") if CASH_COL else ("DATE", "count"),
+    ).reset_index().rename(columns={DATE_COL: "DATE"})
+
+    fig2 = px.bar(
+        shift_daily,
+        x="DATE",
+        y="QTY",
+        color=SHIFT_COL,
+        barmode="group",
+        title="Shift-wise Gas Sales (KG)"
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+
+    fig3 = px.bar(
+        shift_daily,
+        x="DATE",
+        y="CASH",
+        color=SHIFT_COL,
+        barmode="group",
+        title="Shift-wise Cash Collection"
+    )
+    st.plotly_chart(fig3, use_container_width=True)
 
     st.dataframe(shift_daily, use_container_width=True)
 
-    shift_totals = filtered_df.groupby("SHIFT", as_index=False).agg({
-        CASH_COL: "sum",
-        RTGS_COL: "sum",
-        PID_COL: "sum",
-        TOTAL_COL: "sum"
-    })
-
-    st.dataframe(shift_totals, use_container_width=True)
-
-# =====================================================
-# TAB 3 — DAILY METRICS
-# =====================================================
+# =========================
+# TAB 3 — DAILY METRICS (NEW)
+# =========================
 with tab3:
-    selected_date = st.selectbox(
-        "Select Date",
-        sorted(filtered_df["DATE"].dt.date.unique())
+    st.subheader("Daily Financial Metrics")
+
+    metrics = fdf.groupby(fdf[DATE_COL].dt.date).agg(
+        TOTAL_QTY=(QTY_COL, "sum"),
+        TOTAL_CASH=(CASH_COL, "sum") if CASH_COL else ("DATE", "count"),
+        TOTAL_RTGS=(RTGS_COL, "sum") if RTGS_COL else ("DATE", "count"),
+        TOTAL_PID=(PID_COL, "sum") if PID_COL else ("DATE", "count"),
+    ).reset_index().rename(columns={DATE_COL: "DATE"})
+
+    st.dataframe(metrics, use_container_width=True)
+
+    fig4 = px.line(
+        metrics,
+        x="DATE",
+        y=["TOTAL_CASH", "TOTAL_RTGS", "TOTAL_PID"],
+        markers=True,
+        title="Daily Payment Breakdown"
     )
-
-    day_df = filtered_df[filtered_df["DATE"].dt.date == selected_date]
-
-    st.dataframe(
-        day_df.groupby("SHIFT", as_index=False).agg({
-            CASH_COL: "sum",
-            RTGS_COL: "sum",
-            PID_COL: "sum",
-            TOTAL_COL: "sum"
-        }),
-        use_container_width=True
-    )
-
-# =====================================================
-# TAB 4 — DISPENSER TREND
-# =====================================================
-with tab4:
-    if DISP_COLS:
-        disp_df = filtered_df.groupby("DATE", as_index=False)[DISP_COLS].sum()
-        fig = px.line(disp_df, x="DATE", y=DISP_COLS, markers=True)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No dispenser columns detected")
+    st.plotly_chart(fig4, use_container_width=True)
