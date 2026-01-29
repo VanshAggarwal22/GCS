@@ -1,22 +1,22 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import re
-from datetime import date
 import requests
+import re
+
+st.set_page_config(page_title="Gas Sales Dashboard", layout="wide")
 
 # -------------------------
 # CONFIG
 # -------------------------
-st.set_page_config(page_title="Gas Sales Dashboard", layout="wide")
-
 GOOGLE_SHEET_ID = "1_NDdrYnUJnFoJHwc5pZUy5bM920UqMmxP2dUJErGtNA"
+SHEET_RANGE = "AA7:AI14"  # fixed range with metrics
 
 # -------------------------
 # HELPER FUNCTIONS
 # -------------------------
 
-# Get all GIDs from the Google Sheet
+# Get all sheet GIDs
 @st.cache_data(show_spinner=False)
 def get_all_gids(sheet_id):
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?&tqx=out:json"
@@ -24,199 +24,132 @@ def get_all_gids(sheet_id):
     gids = re.findall(r"gid\":(\d+)", res)
     return list(set(gids))
 
-# Load and combine all sheets
+# Load only the relevant range from a sheet
+def load_sheet_range(sheet_id, gid, sheet_range):
+    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}&range={sheet_range}"
+    try:
+        df = pd.read_csv(csv_url, header=None)
+    except Exception as e:
+        st.warning(f"Could not load GID {gid}: {e}")
+        return pd.DataFrame()
+    return df
+
+# Combine all sheets into one DataFrame
 @st.cache_data(show_spinner=False)
-def load_data_all_sheets(sheet_id):
+def load_all_sheets(sheet_id, sheet_range):
     all_gids = get_all_gids(sheet_id)
     df_list = []
-
     for gid in all_gids:
-        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-        try:
-            df_sheet = pd.read_csv(csv_url, header=None)
-        except Exception as e:
-            st.warning(f"Could not load sheet with GID {gid}: {e}")
-            continue
-
-        df_sheet.dropna(how="all", inplace=True)
+        df_sheet = load_sheet_range(sheet_id, gid, sheet_range)
         if df_sheet.empty:
             continue
-
-        # Assume first non-empty row is header
-        header_row_idx = df_sheet.notna().all(axis=1).idxmax()
-        headers = df_sheet.loc[header_row_idx].astype(str).str.strip()
-        df_sheet = df_sheet.loc[header_row_idx + 1:]
-        df_sheet.columns = headers
-
-        # De-duplicate columns and normalize
-        df_sheet.columns = pd.Index(pd.io.parsers.ParserBase({"names": df_sheet.columns})._maybe_dedup_names(df_sheet.columns))
-        df_sheet.columns = df_sheet.columns.str.upper().str.strip()
-
-        df_list.append(df_sheet.reset_index(drop=True))
-
+        df_list.append(df_sheet)
     if df_list:
         return pd.concat(df_list, ignore_index=True)
     else:
-        return pd.DataFrame()  # empty if nothing loaded
-
-# Load all sheets
-df = load_data_all_sheets(GOOGLE_SHEET_ID)
+        return pd.DataFrame()
 
 # -------------------------
-# COLUMN DETECTION
+# LOAD DATA
 # -------------------------
-def find_col(patterns):
-    for col in df.columns:
-        for p in patterns:
-            if re.search(p, col):
-                return col
-    return None
+raw_df = load_all_sheets(GOOGLE_SHEET_ID, SHEET_RANGE)
 
-DATE_COL = find_col([r"DATE"])
-SHIFT_COL = find_col([r"SHIFT", r"A/B/C"])
-QTY_COL = find_col([r"QTY", r"KG"])
-CASH_COL = find_col([r"CASH"])
-RTGS_COL = find_col([r"RTGS"])
-PID_COL = find_col([r"PID"])
-
-required = {
-    "DATE": DATE_COL,
-    "SHIFT": SHIFT_COL,
-    "QTY": QTY_COL
-}
-
-missing = [k for k, v in required.items() if v is None]
-if missing:
-    st.error(f"❌ Missing required columns: {missing}")
+if raw_df.empty:
+    st.error("❌ No data found in the selected range across all sheets.")
     st.stop()
 
 # -------------------------
 # CLEAN DATA
 # -------------------------
-df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
-df = df.dropna(subset=[DATE_COL])
+# Assign proper column names
+columns = ["SHIFT", "QTY", "SALE_AMOUNT", "CASH", "PAYTM", "ATM", "CREDIT_SALE", "TOTAL_COLLECTION", "DIFF"]
+df = raw_df.iloc[:, :len(columns)]
+df.columns = columns
 
-if df.empty:
-    st.error("❌ No valid DATE values found.")
-    st.stop()
+# Drop empty rows
+df = df.dropna(how="all", subset=columns)
 
-# Normalize shifts
-df[SHIFT_COL] = df[SHIFT_COL].astype(str).str.upper().str.strip()
+# Forward-fill SHIFT (because sometimes SHIFT row is blank)
+df["SHIFT"] = df["SHIFT"].ffill()
 
-# Convert numerics safely
-for c in [QTY_COL, CASH_COL, RTGS_COL, PID_COL]:
-    if c:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+# Convert numeric columns safely (remove commas)
+num_cols = ["QTY", "SALE_AMOUNT", "CASH", "PAYTM", "ATM", "CREDIT_SALE", "TOTAL_COLLECTION", "DIFF"]
+for c in num_cols:
+    df[c] = df[c].astype(str).str.replace(",", "").astype(float)
 
-# -------------------------
-# SIDEBAR FILTERS
-# -------------------------
-min_date = df[DATE_COL].min().date()
-max_date = df[DATE_COL].max().date()
-
-date_range = st.sidebar.date_input(
-    "Date Range",
-    value=(min_date, max_date),
-    min_value=min_date,
-    max_value=max_date
-)
-
-if len(date_range) != 2:
-    st.stop()
-
-start_date, end_date = date_range
-mask = (
-    (df[DATE_COL].dt.date >= start_date) &
-    (df[DATE_COL].dt.date <= end_date)
-)
-fdf = df.loc[mask].copy()
+# Mark TOTAL rows
+df["IS_TOTAL"] = df["SHIFT"].str.contains("TOTAL", case=False)
 
 # -------------------------
-# TABS
+# SIDEBAR FILTER
 # -------------------------
-tab1, tab2, tab3 = st.tabs([
-    "📊 Daily Overview",
-    "🔁 Shift-wise Analysis",
-    "📅 Daily Metrics"
+shift_options = df["SHIFT"].unique().tolist()
+selected_shifts = st.sidebar.multiselect("Select Shifts", options=shift_options, default=shift_options)
+
+fdf = df[df["SHIFT"].isin(selected_shifts)]
+
+# -------------------------
+# DASHBOARD TABS
+# -------------------------
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 Shift-wise QTY & Sales",
+    "💰 Payment Breakdown",
+    "📈 Total Collection vs Diff",
+    "📋 Raw Data"
 ])
 
-# =========================
-# TAB 1 — DAILY OVERVIEW
-# =========================
+# -------------------------
+# TAB 1: SHIFT-wise QTY & Sales
+# -------------------------
 with tab1:
-    st.subheader("Daily Gas Sales")
+    st.subheader("Shift-wise Quantity & Sales")
 
-    daily = fdf.groupby(fdf[DATE_COL].dt.date).agg(
-        TOTAL_QTY=(QTY_COL, "sum"),
-        TOTAL_CASH=(CASH_COL, "sum") if CASH_COL else ("DATE", "count"),
-        TOTAL_RTGS=(RTGS_COL, "sum") if RTGS_COL else ("DATE", "count"),
-        TOTAL_PID=(PID_COL, "sum") if PID_COL else ("DATE", "count"),
-    ).reset_index().rename(columns={DATE_COL: "DATE"})
-
-    fig = px.line(
-        daily,
-        x="DATE",
-        y="TOTAL_QTY",
-        markers=True,
-        title="Daily Gas Sales (KG)"
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    st.dataframe(daily, use_container_width=True)
-
-# =========================
-# TAB 2 — SHIFT-WISE ANALYSIS
-# =========================
-with tab2:
-    st.subheader("Shift-wise Performance")
-
-    shift_daily = fdf.groupby(
-        [fdf[DATE_COL].dt.date, SHIFT_COL]
-    ).agg(
-        QTY=(QTY_COL, "sum"),
-        CASH=(CASH_COL, "sum") if CASH_COL else ("DATE", "count"),
-    ).reset_index().rename(columns={DATE_COL: "DATE"})
-
-    fig2 = px.bar(
-        shift_daily,
-        x="DATE",
-        y="QTY",
-        color=SHIFT_COL,
+    fig1 = px.bar(
+        fdf,
+        x="SHIFT",
+        y=["QTY", "SALE_AMOUNT"],
         barmode="group",
-        title="Shift-wise Gas Sales (KG)"
+        text_auto=True,
+        title="Shift-wise Gas Quantity and Sale Amount"
+    )
+    st.plotly_chart(fig1, use_container_width=True)
+
+# -------------------------
+# TAB 2: PAYMENT BREAKDOWN
+# -------------------------
+with tab2:
+    st.subheader("Payment Method Breakdown")
+
+    payment_cols = ["CASH", "PAYTM", "ATM", "CREDIT_SALE"]
+    fig2 = px.bar(
+        fdf,
+        x="SHIFT",
+        y=payment_cols,
+        barmode="stack",
+        text_auto=True,
+        title="Shift-wise Payment Methods"
     )
     st.plotly_chart(fig2, use_container_width=True)
 
+# -------------------------
+# TAB 3: TOTAL COLLECTION vs DIFF
+# -------------------------
+with tab3:
+    st.subheader("Total Collection vs Difference")
+
     fig3 = px.bar(
-        shift_daily,
-        x="DATE",
-        y="CASH",
-        color=SHIFT_COL,
+        fdf,
+        x="SHIFT",
+        y=["TOTAL_COLLECTION", "DIFF"],
         barmode="group",
-        title="Shift-wise Cash Collection"
+        text_auto=True,
+        title="Shift-wise Total Collection vs Difference"
     )
     st.plotly_chart(fig3, use_container_width=True)
-    st.dataframe(shift_daily, use_container_width=True)
 
-# =========================
-# TAB 3 — DAILY METRICS
-# =========================
-with tab3:
-    st.subheader("Daily Financial Metrics")
-
-    metrics = fdf.groupby(fdf[DATE_COL].dt.date).agg(
-        TOTAL_QTY=(QTY_COL, "sum"),
-        TOTAL_CASH=(CASH_COL, "sum") if CASH_COL else ("DATE", "count"),
-        TOTAL_RTGS=(RTGS_COL, "sum") if RTGS_COL else ("DATE", "count"),
-        TOTAL_PID=(PID_COL, "sum") if PID_COL else ("DATE", "count"),
-    ).reset_index().rename(columns={DATE_COL: "DATE"})
-
-    st.dataframe(metrics, use_container_width=True)
-
-    fig4 = px.line(
-        metrics,
-        x="DATE",
-        y=["TOTAL_CASH", "TOTAL_RTGS", "TOTAL_PID"],
-        markers=True,
-        title="Daily Payment Breakdown"
-    )
-    st.plotly_chart(fig4, use_container_width=True)
+# -------------------------
+# TAB 4: RAW DATA
+# -------------------------
+with tab4:
+    st.subheader("Raw Extracted Data")
+    st.dataframe(fdf, use_container_width=True)
