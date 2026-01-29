@@ -12,13 +12,28 @@ GID = "1671830441"
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={GID}"
 
 # =====================================================
+# HELPER: DEDUPLICATE COLUMN NAMES (PANDAS 2 SAFE)
+# =====================================================
+def dedup_columns(cols):
+    seen = {}
+    new_cols = []
+    for c in cols:
+        if c not in seen:
+            seen[c] = 0
+            new_cols.append(c)
+        else:
+            seen[c] += 1
+            new_cols.append(f"{c}_{seen[c]}")
+    return new_cols
+
+# =====================================================
 # LOAD & CLEAN DATA (AUTO HEADER + DATE DETECTION)
 # =====================================================
 @st.cache_data(show_spinner=False)
 def load_data():
     raw = pd.read_csv(CSV_URL, header=None)
 
-    # 🔍 Auto-detect header row (row containing 'DATE')
+    # 🔍 Auto-detect header row (row containing DATE / DAY)
     header_row = None
     for i in range(len(raw)):
         row_vals = raw.iloc[i].astype(str).str.upper().tolist()
@@ -42,13 +57,11 @@ def load_data():
         .str.replace(" ", "_")
     )
 
-    # Drop fully empty rows
-    df = df.dropna(how="all")
+    # Deduplicate column names (SAFE)
+    df.columns = dedup_columns(df.columns)
 
-    # Deduplicate column names (VERY IMPORTANT)
-    df.columns = pd.io.parsers.ParserBase(
-        {"names": df.columns}
-    )._maybe_dedup_names(df.columns)
+    # Drop empty rows
+    df = df.dropna(how="all")
 
     # -----------------------------
     # DATE COLUMN (1st column)
@@ -66,7 +79,7 @@ def load_data():
     for col in df.columns[2:]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    # Remove rows without date
+    # Remove invalid dates
     df = df.dropna(subset=["DATE"])
 
     return df
@@ -101,7 +114,7 @@ max_date = df["DATE"].max()
 
 date_range = st.sidebar.date_input(
     "Select Date Range",
-    value=[min_date, max_date],
+    [min_date, max_date],
     min_value=min_date,
     max_value=max_date
 )
@@ -157,7 +170,7 @@ with tab1:
     st.dataframe(daily, use_container_width=True)
 
 # =====================================================
-# TAB 2 — SHIFT-WISE ANALYSIS (CORRECT)
+# TAB 2 — SHIFT-WISE ANALYSIS
 # =====================================================
 with tab2:
     st.subheader("Shift-wise Analysis")
@@ -192,7 +205,7 @@ with tab2:
     st.dataframe(shift_totals, use_container_width=True)
 
 # =====================================================
-# TAB 3 — DAILY METRICS (ISOLATED)
+# TAB 3 — DAILY METRICS
 # =====================================================
 with tab3:
     st.subheader("Daily Metrics")
@@ -210,7 +223,6 @@ with tab3:
     c3.metric("PID", f"₹ {day_df[PID_COL].sum():,.0f}")
     c4.metric("Total", f"₹ {day_df[TOTAL_COL].sum():,.0f}")
 
-    st.markdown("### Shift-wise Breakdown")
     st.dataframe(
         day_df.groupby("SHIFT", as_index=False).agg({
             CASH_COL: "sum",
@@ -222,7 +234,7 @@ with tab3:
     )
 
 # =====================================================
-# TAB 4 — DISPENSER TREND (FIXED)
+# TAB 4 — DISPENSER TREND
 # =====================================================
 with tab4:
     st.subheader("Dispenser Consumption Trend")
