@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import re
 from datetime import date
+import requests
 
 # -------------------------
 # CONFIG
@@ -10,35 +11,56 @@ from datetime import date
 st.set_page_config(page_title="Gas Sales Dashboard", layout="wide")
 
 GOOGLE_SHEET_ID = "1_NDdrYnUJnFoJHwc5pZUy5bM920UqMmxP2dUJErGtNA"
-GID = "1671830441"
-
-CSV_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv&gid={GID}"
 
 # -------------------------
-# DATA LOADER
+# HELPER FUNCTIONS
 # -------------------------
+
+# Get all GIDs from the Google Sheet
 @st.cache_data(show_spinner=False)
-def load_data():
-    df = pd.read_csv(CSV_URL, header=None)
+def get_all_gids(sheet_id):
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?&tqx=out:json"
+    res = requests.get(url).text
+    gids = re.findall(r"gid\":(\d+)", res)
+    return list(set(gids))
 
-    # Drop fully empty rows
-    df.dropna(how="all", inplace=True)
+# Load and combine all sheets
+@st.cache_data(show_spinner=False)
+def load_data_all_sheets(sheet_id):
+    all_gids = get_all_gids(sheet_id)
+    df_list = []
 
-    # Assume header row is the first non-empty row
-    header_row_idx = df.notna().all(axis=1).idxmax()
-    headers = df.loc[header_row_idx].astype(str).str.strip()
-    df = df.loc[header_row_idx + 1:]
-    df.columns = headers
+    for gid in all_gids:
+        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+        try:
+            df_sheet = pd.read_csv(csv_url, header=None)
+        except Exception as e:
+            st.warning(f"Could not load sheet with GID {gid}: {e}")
+            continue
 
-    # De-duplicate column names
-    df.columns = pd.Index(pd.io.parsers.ParserBase({"names": df.columns})._maybe_dedup_names(df.columns))
+        df_sheet.dropna(how="all", inplace=True)
+        if df_sheet.empty:
+            continue
 
-    # Strip spaces
-    df.columns = df.columns.str.upper().str.strip()
+        # Assume first non-empty row is header
+        header_row_idx = df_sheet.notna().all(axis=1).idxmax()
+        headers = df_sheet.loc[header_row_idx].astype(str).str.strip()
+        df_sheet = df_sheet.loc[header_row_idx + 1:]
+        df_sheet.columns = headers
 
-    return df.reset_index(drop=True)
+        # De-duplicate columns and normalize
+        df_sheet.columns = pd.Index(pd.io.parsers.ParserBase({"names": df_sheet.columns})._maybe_dedup_names(df_sheet.columns))
+        df_sheet.columns = df_sheet.columns.str.upper().str.strip()
 
-df = load_data()
+        df_list.append(df_sheet.reset_index(drop=True))
+
+    if df_list:
+        return pd.concat(df_list, ignore_index=True)
+    else:
+        return pd.DataFrame()  # empty if nothing loaded
+
+# Load all sheets
+df = load_data_all_sheets(GOOGLE_SHEET_ID)
 
 # -------------------------
 # COLUMN DETECTION
@@ -87,7 +109,7 @@ for c in [QTY_COL, CASH_COL, RTGS_COL, PID_COL]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
 # -------------------------
-# SIDEBAR FILTERS (SAFE)
+# SIDEBAR FILTERS
 # -------------------------
 min_date = df[DATE_COL].min().date()
 max_date = df[DATE_COL].max().date()
@@ -103,7 +125,6 @@ if len(date_range) != 2:
     st.stop()
 
 start_date, end_date = date_range
-
 mask = (
     (df[DATE_COL].dt.date >= start_date) &
     (df[DATE_COL].dt.date <= end_date)
@@ -120,7 +141,7 @@ tab1, tab2, tab3 = st.tabs([
 ])
 
 # =========================
-# TAB 1 — DAILY OVERVIEW (UNCHANGED LOGIC)
+# TAB 1 — DAILY OVERVIEW
 # =========================
 with tab1:
     st.subheader("Daily Gas Sales")
@@ -140,11 +161,10 @@ with tab1:
         title="Daily Gas Sales (KG)"
     )
     st.plotly_chart(fig, use_container_width=True)
-
     st.dataframe(daily, use_container_width=True)
 
 # =========================
-# TAB 2 — SHIFT-WISE ANALYSIS (FIXED)
+# TAB 2 — SHIFT-WISE ANALYSIS
 # =========================
 with tab2:
     st.subheader("Shift-wise Performance")
@@ -175,11 +195,10 @@ with tab2:
         title="Shift-wise Cash Collection"
     )
     st.plotly_chart(fig3, use_container_width=True)
-
     st.dataframe(shift_daily, use_container_width=True)
 
 # =========================
-# TAB 3 — DAILY METRICS (NEW)
+# TAB 3 — DAILY METRICS
 # =========================
 with tab3:
     st.subheader("Daily Financial Metrics")
