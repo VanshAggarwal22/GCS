@@ -117,9 +117,8 @@ if page == "Daily Link Entry":
     st.subheader("Saved Daily Links")
     st.write(st.session_state.daily_links)
 
-
 # ==================================================
-# 2️⃣ DAILY DASHBOARD (FINAL CORRECT VERSION)
+# 2️⃣ DAILY DASHBOARD (FINAL – NO DOUBLE COUNTING)
 # ==================================================
 if page == "Daily Dashboard":
 
@@ -143,7 +142,7 @@ if page == "Daily Dashboard":
             st.dataframe(df, use_container_width=True)
 
             # -------------------------------------------------
-            # Detect Numeric Columns
+            # Identify numeric columns
             # -------------------------------------------------
             numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
 
@@ -152,17 +151,32 @@ if page == "Daily Dashboard":
             else:
 
                 # ---------------------------------------------
-                # Remove columns containing TOTAL (avoid double count)
+                # Remove TOTAL columns
                 # ---------------------------------------------
                 base_numeric_cols = [
                     col for col in numeric_cols
                     if "TOTAL" not in str(col).upper()
                 ]
 
-                totals = df[base_numeric_cols].sum()
+                # ---------------------------------------------
+                # Remove TOTAL row from calculations
+                # ---------------------------------------------
+                df_clean = df.copy()
+
+                if "SHIFT" in df_clean.columns:
+                    df_clean = df_clean[
+                        ~df_clean["SHIFT"]
+                        .astype(str)
+                        .str.upper()
+                        .str.contains("TOTAL", na=False)
+                    ]
+                else:
+                    df_clean = df_clean.iloc[:-1]  # assume last row is TOTAL
+
+                totals = df_clean[base_numeric_cols].sum()
 
                 # ---------------------------------------------
-                # Helper to find column by keyword
+                # Helper to detect column by keyword
                 # ---------------------------------------------
                 def find_column(keyword):
                     for col in df.columns:
@@ -204,24 +218,28 @@ if page == "Daily Dashboard":
                 k6.metric("🏧 ATM (₹)",
                           f"{totals.get(atm_col, 0):,.0f}" if atm_col else "0")
 
-                k7.metric("💼 Total Collection (₹)",
-                          f"{df[collection_col].sum():,.0f}" if collection_col else "0")
+                # Total Collection should come ONLY from total row (last row)
+                if collection_col:
+                    total_collection_value = df[collection_col].iloc[-1]
+                    k7.metric("💼 Total Collection (₹)",
+                              f"{total_collection_value:,.0f}")
+                else:
+                    k7.metric("💼 Total Collection (₹)", "0")
 
                 # ---------------------------------------------
-                # Payment Mix Pie Chart
+                # Payment Mix Pie (based on clean shift data only)
                 # ---------------------------------------------
                 payment_cols = []
 
                 for col in [cash_col, paytm_col, credit_col, atm_col]:
-                    if col and col in df.columns:
+                    if col and col in df_clean.columns:
                         payment_cols.append(col)
 
                 if payment_cols:
-
                     st.divider()
                     st.subheader("💳 Payment Mix")
 
-                    payment_data = df[payment_cols].sum().reset_index()
+                    payment_data = df_clean[payment_cols].sum().reset_index()
                     payment_data.columns = ["Mode", "Amount"]
 
                     fig_pie = px.pie(
@@ -234,17 +252,15 @@ if page == "Daily Dashboard":
                     st.plotly_chart(fig_pie, use_container_width=True)
 
                 # ---------------------------------------------
-                # Shift Comparison (if SHIFT exists)
+                # Shift Comparison
                 # ---------------------------------------------
-                if "SHIFT" in df.columns:
-
-                    shift_numeric = df.set_index("SHIFT")[base_numeric_cols]
+                if "SHIFT" in df_clean.columns:
 
                     st.divider()
                     st.subheader("📊 Shift Comparison")
 
                     fig_bar = px.bar(
-                        shift_numeric.reset_index(),
+                        df_clean,
                         x="SHIFT",
                         y=base_numeric_cols,
                         barmode="group"
