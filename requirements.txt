@@ -6,3 +6,4 @@ google-auth
 numpy
 openpyxl
 scikit-learn
+matplotlib
