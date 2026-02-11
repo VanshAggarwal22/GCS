@@ -138,9 +138,7 @@ if page == "Daily Dashboard":
 
         if df is not None:
 
-            st.subheader("📄 Daily Raw Data")
-            st.dataframe(df, use_container_width=True)
-
+            
             # -------------------------------------------------
             # Identify numeric columns
             # -------------------------------------------------
@@ -267,7 +265,9 @@ if page == "Daily Dashboard":
                     )
 
                     st.plotly_chart(fig_bar, use_container_width=True)
-
+                    
+                st.subheader("📄 Daily Raw Data")
+                st.dataframe(df, use_container_width=True)
 
 
 # ==================================================
