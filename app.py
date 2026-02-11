@@ -1,220 +1,296 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
-import requests
+import plotly.express as px
 import re
+import numpy as np
 
-st.set_page_config(layout="wide")
-st.title("📊 Business Dashboard")
+# --------------------------------------------------
+# PAGE CONFIG
+# --------------------------------------------------
+st.set_page_config(page_title="CNG Intelligence Dashboard", layout="wide")
 
-# =========================================================
-# Helper Function – Clean Numeric Columns Safely
-# =========================================================
+# --------------------------------------------------
+# SESSION STATE STORAGE
+# --------------------------------------------------
+if "daily_links" not in st.session_state:
+    st.session_state.daily_links = {}
 
-def clean_numeric_column(series):
-    cleaned = (
-        series.astype(str)
-        .str.replace(",", "", regex=False)
-        .str.replace("₹", "", regex=False)
-        .str.strip()
-    )
-    return pd.to_numeric(cleaned, errors="coerce").fillna(0)
+if "monthly_links" not in st.session_state:
+    st.session_state.monthly_links = {}
 
-# =========================================================
-# TABS
-# =========================================================
+# --------------------------------------------------
+# EXTRACT SHEET ID
+# --------------------------------------------------
+def extract_sheet_id(link):
+    match = re.search(r"/d/([a-zA-Z0-9-_]+)", link)
+    return match.group(1) if match else None
 
-tab1, tab2 = st.tabs(["📆 Monthly Dashboard", "📅 Daily Dashboard"])
+# --------------------------------------------------
+# EXTRACT GID
+# --------------------------------------------------
+def extract_gid(link):
+    match = re.search(r"gid=([0-9]+)", link)
+    return match.group(1) if match else None
 
-# =========================================================
-# 📆 MONTHLY TAB (Original Style – Stable)
-# =========================================================
 
-with tab1:
+# ==================================================
+# DAILY LOADER (AUTO SHEET ID + GID)
+# ==================================================
+def load_daily_sheet(link):
 
-    st.header("Monthly Dashboard")
+    sheet_id = extract_sheet_id(link)
+    gid = extract_gid(link)
 
-    uploaded_file = st.file_uploader(
-        "Upload Monthly Excel File",
-        type=["xlsx"]
-    )
+    if not sheet_id or not gid:
+        st.error("Invalid Google Sheet link. Must contain sheet id and gid.")
+        return None
 
-    if uploaded_file:
+    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+
+    try:
+        raw = pd.read_csv(csv_url, header=None)
+    except:
+        st.error("Unable to fetch sheet. Make sure it is public.")
+        return None
+
+    # ------------------------------
+    # FIND CONSOLIDATE DATA SECTION
+    # ------------------------------
+    start_row = None
+    for i in range(len(raw)):
+        if raw.iloc[i].astype(str).str.contains("CONSOLIDATE", case=False).any():
+            start_row = i
+            break
+
+    if start_row is None:
+        st.error("Consolidate data section not found.")
+        return None
+
+    header_row = start_row + 1
+    data_start = header_row + 1
+
+    headers = raw.iloc[header_row].dropna().tolist()
+    df = raw.iloc[data_start:data_start + 6, :len(headers)].copy()
+    df.columns = headers
+    df = df.dropna(how="all")
+
+    # Clean numeric columns
+    for col in df.columns:
+        if col.upper() != "SHIFT":
+            df[col] = pd.to_numeric(
+                df[col].astype(str).str.replace(",", "", regex=False),
+                errors="coerce"
+            ).fillna(0)
+
+    return df
+
+
+# --------------------------------------------------
+# SIDEBAR NAVIGATION
+# --------------------------------------------------
+st.sidebar.title("📊 Navigation")
+
+page = st.sidebar.radio(
+    "Select View",
+    [
+        "Daily Link Entry",
+        "Daily Dashboard",
+        "Monthly Link Manager",
+        "Monthly Dashboard"
+    ]
+)
+
+# ==================================================
+# 1️⃣ DAILY LINK ENTRY (ONLY LINK NOW)
+# ==================================================
+if page == "Daily Link Entry":
+
+    st.title("📅 Add Daily Sheet Link")
+
+    selected_date = st.date_input("Select Date")
+    link = st.text_input("Paste Full Google Sheet Link")
+
+    if st.button("Save Daily Link"):
+        if link:
+            st.session_state.daily_links[str(selected_date)] = link
+            st.success("Daily link saved successfully")
+        else:
+            st.warning("Please enter a valid Google Sheet link.")
+
+    st.subheader("Saved Daily Links")
+    st.write(st.session_state.daily_links)
+
+
+# ==================================================
+# 2️⃣ DAILY DASHBOARD
+# ==================================================
+if page == "Daily Dashboard":
+
+    st.title("📈 Daily Operations Dashboard")
+
+    if not st.session_state.daily_links:
+        st.warning("No daily links added yet.")
+    else:
+
+        selected_date = st.selectbox(
+            "Select Date",
+            list(st.session_state.daily_links.keys())
+        )
+
+        link = st.session_state.daily_links[selected_date]
+        df = load_daily_sheet(link)
+
+        if df is not None:
+
+            if "SHIFT" not in df.columns:
+                st.error("SHIFT column not found.")
+            else:
+                total_row = df[df["SHIFT"].astype(str).str.upper() == "TOTAL"]
+
+                if total_row.empty:
+                    st.error("TOTAL row not found.")
+                else:
+                    total_row = total_row.iloc[0]
+
+                    def safe(col):
+                        return total_row[col] if col in total_row else 0
+
+                    k1, k2, k3, k4, k5 = st.columns(5)
+
+                    k1.metric("🔥 Gas Sold (KG)", f"{safe('QTY'):,.0f}")
+                    k2.metric("💰 Sale Amount (₹)", f"{safe('SALE AMOUNT'):,.0f}")
+                    k3.metric("💵 Cash (₹)", f"{safe('CASH'):,.0f}")
+                    k4.metric("📲 Paytm (₹)", f"{safe('PAYTM'):,.0f}")
+                    k5.metric("💳 Credit (₹)", f"{safe('CREDIT SALE'):,.0f}")
+
+                    st.divider()
+
+                    st.subheader("📄 Shift Breakdown")
+                    st.dataframe(df, use_container_width=True)
+
+
+# ==================================================
+# 3️⃣ MONTHLY LINK MANAGER (UNCHANGED ORIGINAL)
+# ==================================================
+if page == "Monthly Link Manager":
+
+    st.title("📆 Add Monthly Sheet Link")
+
+    month_name = st.text_input("Enter Month Name (Example: March 2026)")
+    link = st.text_input("Paste Full Google Sheet Link")
+
+    if st.button("Save Monthly Link"):
+        if month_name and link:
+            st.session_state.monthly_links[month_name] = link
+            st.success("Monthly link saved successfully")
+
+    st.subheader("Saved Monthly Links")
+    st.write(st.session_state.monthly_links)
+
+
+# ==================================================
+# 4️⃣ MONTHLY DASHBOARD (ORIGINAL)
+# ==================================================
+if page == "Monthly Dashboard":
+
+    st.title("🚀 Monthly Operations Dashboard")
+
+    if not st.session_state.monthly_links:
+        st.warning("No monthly links added yet.")
+    else:
+
+        selected_month = st.selectbox(
+            "Select Month",
+            list(st.session_state.monthly_links.keys())
+        )
+
+        link = st.session_state.monthly_links[selected_month]
+
+        sheet_id = extract_sheet_id(link)
+        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
 
         try:
-            df = pd.read_excel(uploaded_file)
+            raw = pd.read_csv(csv_url, header=2)
+        except:
+            st.error("Unable to fetch sheet.")
+            st.stop()
 
-            df.columns = df.columns.str.strip()
-            df = df.dropna(how="all")
+        raw.columns = raw.iloc[0]
+        df = raw.iloc[1:].copy()
 
-            # Detect numeric columns (original simple style)
-            numeric_cols = []
+        df.columns = (
+            df.columns.astype(str)
+            .str.strip()
+            .str.upper()
+            .str.replace("\n", " ")
+        )
 
-            for col in df.columns:
-                try:
-                    df[col] = clean_numeric_column(df[col])
-                    if df[col].sum() != 0:
-                        numeric_cols.append(col)
-                except:
-                    pass
+        def make_unique(cols):
+            seen = {}
+            new_cols = []
+            for col in cols:
+                if col not in seen:
+                    seen[col] = 0
+                    new_cols.append(col)
+                else:
+                    seen[col] += 1
+                    new_cols.append(f"{col}_{seen[col]}")
+            return new_cols
 
-            st.subheader("📋 Raw Data")
-            st.dataframe(df, use_container_width=True)
+        df.columns = make_unique(df.columns)
 
-            if numeric_cols:
+        if "SHIFT" in df.columns:
+            df["SHIFT"] = df["SHIFT"].astype(str).str.strip()
+            df = df[df["SHIFT"].isin(["A", "B", "C"])]
 
-                totals = df[numeric_cols].sum()
+        if "DATE" in df.columns:
+            df["DATE"] = df["DATE"].ffill()
+            df["DATE"] = pd.to_datetime(df["DATE"], dayfirst=True, errors="coerce")
+            df = df.dropna(subset=["DATE"])
 
-                st.subheader("📊 Summary Stats")
-                cols = st.columns(len(numeric_cols))
-
-                for i, col in enumerate(numeric_cols):
-                    cols[i].metric(
-                        label=col,
-                        value=f"{totals[col]:,.2f}"
-                    )
-
-                # Trend Charts
-                st.subheader("📈 Trends")
-
-                x_axis = df.columns[0]
-
-                for col in numeric_cols:
-                    fig, ax = plt.subplots()
-                    ax.plot(df[x_axis], df[col])
-                    ax.set_title(col)
-                    ax.set_xlabel(x_axis)
-                    ax.set_ylabel(col)
-                    st.pyplot(fig)
-
-        except Exception as e:
-            st.error(f"Error processing file: {e}")
-
-# =========================================================
-# 📅 DAILY TAB (Dynamic + Link Based)
-# =========================================================
-
-with tab2:
-
-    st.header("Daily Dashboard")
-
-    daily_link = st.text_input("Paste Google Sheet link")
-
-    if daily_link:
-
-        try:
-            # --------------------------
-            # Extract Sheet ID
-            # --------------------------
-            sheet_id_match = re.search(r"/d/([a-zA-Z0-9-_]+)", daily_link)
-            if not sheet_id_match:
-                st.error("Invalid Google Sheet link.")
-                st.stop()
-
-            sheet_id = sheet_id_match.group(1)
-
-            # --------------------------
-            # Extract GID
-            # --------------------------
-            gid_match = re.search(r"gid=([0-9]+)", daily_link)
-            if not gid_match:
-                st.error("No GID found in link.")
-                st.stop()
-
-            gid = gid_match.group(1)
-
-            # --------------------------
-            # Convert to CSV URL
-            # --------------------------
-            csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-
-            df = pd.read_csv(csv_url)
-
-            if df.empty:
-                st.error("No data found in sheet.")
-                st.stop()
-
-            df.columns = df.columns.str.strip()
-            df = df.dropna(how="all")
-
-            # --------------------------
-            # Dynamic Numeric Detection
-            # --------------------------
-            numeric_cols = []
-
-            for col in df.columns:
-                cleaned_series = (
-                    df[col]
-                    .astype(str)
+        for col in df.columns:
+            if col not in ["DATE", "SHIFT"]:
+                df[col] = (
+                    df[col].astype(str)
                     .str.replace(",", "", regex=False)
-                    .str.replace("₹", "", regex=False)
-                    .str.strip()
+                    .replace("nan", "0")
                 )
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-                converted = pd.to_numeric(cleaned_series, errors="coerce")
+        daily = df.groupby("DATE", as_index=False).sum(numeric_only=True)
 
-                if converted.notna().sum() > len(df) * 0.4:
-                    df[col] = converted.fillna(0)
-                    numeric_cols.append(col)
+        date_range = st.sidebar.date_input(
+            "Select Date Range",
+            [daily["DATE"].min(), daily["DATE"].max()]
+        )
 
-            # --------------------------
-            # Display Raw Data
-            # --------------------------
-            st.subheader("📋 Raw Data")
-            st.dataframe(df, use_container_width=True)
+        daily = daily[
+            (daily["DATE"] >= pd.to_datetime(date_range[0])) &
+            (daily["DATE"] <= pd.to_datetime(date_range[1]))
+        ]
 
-            # --------------------------
-            # Summary Stats (Dynamic)
-            # --------------------------
-            if numeric_cols:
+        def safe(col):
+            return daily[col].sum() if col in daily.columns else 0
 
-                totals = df[numeric_cols].sum()
+        k1, k2, k3, k4, k5 = st.columns(5)
 
-                st.subheader("📊 Summary Stats")
+        k1.metric("🔥 Total Gas (KG)", f"{safe('TOTAL DSR QTY. KG'):,.0f}")
+        k2.metric("💳 Credit (₹)", f"{safe('CREDIT SALE (RS.)'):,.0f}")
+        k3.metric("💰 Paytm (₹)", f"{safe('PAYTM'):,.0f}")
+        k4.metric("🏦 Cash Deposit (₹)", f"{safe('CASH DEPOSIIT IN BANK'):,.0f}")
+        k5.metric("⚠️ Short Amount (₹)", f"{safe('SHORT AMOUNT'):,.0f}")
 
-                cols = st.columns(len(numeric_cols))
+        st.divider()
 
-                for i, col in enumerate(numeric_cols):
-                    cols[i].metric(
-                        label=col,
-                        value=f"{totals[col]:,.2f}"
-                    )
+        if "TOTAL DSR QTY. KG" in daily.columns:
+            fig = px.line(
+                daily,
+                x="DATE",
+                y="TOTAL DSR QTY. KG",
+                markers=True,
+                title="Monthly Gas Trend"
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
-            # --------------------------
-            # Trends
-            # --------------------------
-            if numeric_cols:
-
-                st.subheader("📈 Trends")
-
-                x_axis = df.columns[0]
-
-                for col in numeric_cols:
-                    fig, ax = plt.subplots()
-                    ax.plot(df[x_axis], df[col])
-                    ax.set_title(col)
-                    ax.set_xlabel(x_axis)
-                    ax.set_ylabel(col)
-                    st.pyplot(fig)
-
-            # --------------------------
-            # Top Performers
-            # --------------------------
-            if numeric_cols:
-
-                st.subheader("🏆 Top Contributors")
-
-                selected_metric = st.selectbox(
-                    "Select Metric",
-                    numeric_cols
-                )
-
-                sorted_df = df.sort_values(
-                    by=selected_metric,
-                    ascending=False
-                )
-
-                st.dataframe(sorted_df.head(10), use_container_width=True)
-
-        except Exception as e:
-            st.error(f"Error: {e}")
+        st.subheader("📄 Monthly Data")
+        st.dataframe(daily, use_container_width=True)
