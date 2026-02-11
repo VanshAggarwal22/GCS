@@ -17,21 +17,19 @@ MONTHLY_SHEETS = {
     "February 2026": "1bZBzVx1oJUXf4tBIpgJwJan8iwh7alz9CO9Z_5TMB3I"
 }
 
-# --------------------------------------------------
-# SIDEBAR NAVIGATION
-# --------------------------------------------------
-st.sidebar.title("📊 Navigation")
-page = st.sidebar.radio(
-    "Select View",
-    ["Monthly Intelligence Dashboard"]
-)
+# Session storage for daily GID mapping
+if "daily_gid_map" not in st.session_state:
+    st.session_state.daily_gid_map = {}
 
 # --------------------------------------------------
-# LOAD + CLEAN FUNCTION (BASED ON YOUR WORKING CODE)
+# COMMON LOAD + CLEAN FUNCTION
 # --------------------------------------------------
-def load_monthly_data(sheet_id):
+def load_sheet(sheet_id, gid=None):
 
-    CSV_URL = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+    if gid:
+        CSV_URL = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    else:
+        CSV_URL = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
 
     raw = pd.read_csv(CSV_URL, header=2)
 
@@ -45,7 +43,7 @@ def load_monthly_data(sheet_id):
         .str.replace("\n", " ")
     )
 
-    # Make unique column names
+    # Make columns unique
     def make_unique(cols):
         seen = {}
         new_cols = []
@@ -60,7 +58,7 @@ def load_monthly_data(sheet_id):
 
     df.columns = make_unique(df.columns)
 
-    # Keep only shifts
+    # Filter shifts
     df["SHIFT"] = df["SHIFT"].astype(str).str.strip()
     df = df[df["SHIFT"].isin(["A", "B", "C"])]
 
@@ -79,67 +77,119 @@ def load_monthly_data(sheet_id):
             )
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    # Aggregate per day
-    daily = df.groupby("DATE", as_index=False).sum(numeric_only=True)
+    return df
 
-    return daily
 
 # --------------------------------------------------
-# FORECAST FUNCTION (NO SKLEARN)
+# SIDEBAR NAVIGATION
 # --------------------------------------------------
-def forecast_next_7_days(df, column):
-    df = df.sort_values("DATE")
-    df["DAY_NUM"] = (df["DATE"] - df["DATE"].min()).dt.days
+st.sidebar.title("📊 Navigation")
+page = st.sidebar.radio(
+    "Select View",
+    ["Daily GID Entry",
+     "Daily Dashboard",
+     "Monthly Dashboard"]
+)
 
-    X = df["DAY_NUM"].values
-    y = df[column].values
+# ==================================================
+# 1️⃣ DAILY GID ENTRY
+# ==================================================
+if page == "Daily GID Entry":
 
-    if len(X) < 2:
-        return None
+    st.title("📅 Daily GID Mapping")
 
-    slope, intercept = np.polyfit(X, y, 1)
+    selected_month = st.selectbox(
+        "Select Month Source",
+        list(MONTHLY_SHEETS.keys())
+    )
 
-    last_day = df["DAY_NUM"].max()
-    future_days = np.array([last_day + i for i in range(1, 8)])
-    future_values = slope * future_days + intercept
+    selected_date = st.date_input("Select Date")
+    gid_input = st.text_input("Enter GID")
 
-    future_dates = [df["DATE"].max() + timedelta(days=i) for i in range(1, 8)]
+    if st.button("Save Mapping"):
+        if gid_input:
+            st.session_state.daily_gid_map[str(selected_date)] = {
+                "sheet_id": MONTHLY_SHEETS[selected_month],
+                "gid": gid_input
+            }
+            st.success("Mapping saved successfully")
 
-    return pd.DataFrame({
-        "DATE": future_dates,
-        "FORECAST": future_values
-    })
+    st.subheader("Saved Mappings")
+    st.write(st.session_state.daily_gid_map)
 
-# --------------------------------------------------
-# ALERT SYSTEM
-# --------------------------------------------------
-def detect_short_alerts(df):
-    if "SHORT AMOUNT" not in df.columns:
-        return None
 
-    mean = df["SHORT AMOUNT"].mean()
-    std = df["SHORT AMOUNT"].std()
+# ==================================================
+# 2️⃣ DAILY DASHBOARD
+# ==================================================
+if page == "Daily Dashboard":
 
-    abnormal = df[df["SHORT AMOUNT"] > mean + 2*std]
+    st.title("📈 Daily Operations Dashboard")
 
-    return abnormal
+    if not st.session_state.daily_gid_map:
+        st.warning("No daily GIDs saved yet.")
+    else:
 
-# --------------------------------------------------
-# MAIN DASHBOARD
-# --------------------------------------------------
-if page == "Monthly Intelligence Dashboard":
+        selected_date = st.selectbox(
+            "Select Date",
+            list(st.session_state.daily_gid_map.keys())
+        )
 
-    st.title("🚀 CNG Monthly Intelligence Dashboard")
+        mapping = st.session_state.daily_gid_map[selected_date]
+        sheet_id = mapping["sheet_id"]
+        gid = mapping["gid"]
+
+        df = load_sheet(sheet_id, gid)
+
+        # Aggregate daily
+        daily = df.groupby("DATE", as_index=False).sum(numeric_only=True)
+
+        def safe(col):
+            return daily[col].sum() if col in daily.columns else 0
+
+        st.subheader("📊 Daily KPIs")
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+
+        k1.metric("🔥 Total Gas Sold (KG)", f"{safe('TOTAL DSR QTY. KG'):,.0f}")
+        k2.metric("💳 Credit Sales (₹)", f"{safe('CREDIT SALE (RS.)'):,.0f}")
+        k3.metric("💰 Paytm (₹)", f"{safe('PAYTM'):,.0f}")
+        k4.metric("🏦 Cash Deposit (₹)", f"{safe('CASH DEPOSIIT IN BANK'):,.0f}")
+        k5.metric("⚠️ Short Amount (₹)", f"{safe('SHORT AMOUNT'):,.0f}")
+
+        st.divider()
+
+        if "TOTAL DSR QTY. KG" in daily.columns:
+            fig = px.bar(
+                daily,
+                x="DATE",
+                y="TOTAL DSR QTY. KG",
+                title="Gas Sold (Daily)"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("📄 Raw Daily Data")
+        st.dataframe(daily, use_container_width=True)
+
+
+# ==================================================
+# 3️⃣ MONTHLY DASHBOARD
+# ==================================================
+if page == "Monthly Dashboard":
+
+    st.title("🚀 Monthly Operations Dashboard")
 
     selected_month = st.selectbox(
         "Select Month",
         list(MONTHLY_SHEETS.keys())
     )
 
-    daily = load_monthly_data(MONTHLY_SHEETS[selected_month])
+    df = load_sheet(MONTHLY_SHEETS[selected_month])
+
+    # Aggregate daily
+    daily = df.groupby("DATE", as_index=False).sum(numeric_only=True)
 
     # Sidebar Date Filter
-    st.sidebar.header("🔎 Filters")
+    st.sidebar.header("🔎 Date Filter")
     date_range = st.sidebar.date_input(
         "Select Date Range",
         [daily["DATE"].min(), daily["DATE"].max()]
@@ -153,76 +203,27 @@ if page == "Monthly Intelligence Dashboard":
     def safe(col):
         return daily[col].sum() if col in daily.columns else 0
 
-    # --------------------------------------------------
-    # KPIs
-    # --------------------------------------------------
-    st.subheader("📊 Key Performance Indicators")
+    st.subheader("📊 Monthly KPIs")
 
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1, k2, k3, k4, k5 = st.columns(5)
 
-    total_gas = safe("TOTAL DSR QTY. KG")
-    credit = safe("CREDIT SALE (RS.)")
-    paytm = safe("PAYTM")
-    cash = safe("CASH DEPOSIIT IN BANK")
-    expenses = safe("EXPENSES")
-    short_amt = safe("SHORT AMOUNT")
-
-    estimated_profit = cash + paytm + credit - expenses - short_amt
-
-    k1.metric("🔥 Total Gas Sold (KG)", f"{total_gas:,.0f}")
-    k2.metric("💳 Credit Sales (₹)", f"{credit:,.0f}")
-    k3.metric("💰 Digital Sales (₹)", f"{paytm:,.0f}")
-    k4.metric("🏦 Cash Deposited (₹)", f"{cash:,.0f}")
-    k5.metric("💸 Expenses (₹)", f"{expenses:,.0f}")
-    k6.metric("📈 Estimated Profit (₹)", f"{estimated_profit:,.0f}")
+    k1.metric("🔥 Total Gas Sold (KG)", f"{safe('TOTAL DSR QTY. KG'):,.0f}")
+    k2.metric("💳 Credit Sales (₹)", f"{safe('CREDIT SALE (RS.)'):,.0f}")
+    k3.metric("💰 Paytm (₹)", f"{safe('PAYTM'):,.0f}")
+    k4.metric("🏦 Cash Deposit (₹)", f"{safe('CASH DEPOSIIT IN BANK'):,.0f}")
+    k5.metric("⚠️ Short Amount (₹)", f"{safe('SHORT AMOUNT'):,.0f}")
 
     st.divider()
 
-    # --------------------------------------------------
-    # SALES TREND
-    # --------------------------------------------------
     if "TOTAL DSR QTY. KG" in daily.columns:
-        fig_qty = px.line(
+        fig = px.line(
             daily,
             x="DATE",
             y="TOTAL DSR QTY. KG",
             markers=True,
-            title="Daily Gas Sales Trend"
+            title="Monthly Gas Sales Trend"
         )
-        st.plotly_chart(fig_qty, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
-    # --------------------------------------------------
-    # FORECAST
-    # --------------------------------------------------
-    st.subheader("🔮 7-Day Forecast (Gas Sales)")
-
-    forecast_df = forecast_next_7_days(daily, "TOTAL DSR QTY. KG")
-
-    if forecast_df is not None:
-        fig_forecast = px.line(daily, x="DATE", y="TOTAL DSR QTY. KG")
-        fig_forecast.add_scatter(
-            x=forecast_df["DATE"],
-            y=forecast_df["FORECAST"],
-            mode="lines",
-            name="Forecast"
-        )
-        st.plotly_chart(fig_forecast, use_container_width=True)
-
-    # --------------------------------------------------
-    # ALERTS
-    # --------------------------------------------------
-    st.subheader("🚨 Risk Alerts")
-
-    abnormal = detect_short_alerts(daily)
-
-    if abnormal is not None and not abnormal.empty:
-        st.error(f"⚠️ Abnormal Short Amount detected on {len(abnormal)} days")
-        st.dataframe(abnormal[["DATE", "SHORT AMOUNT"]])
-    else:
-        st.success("No abnormal short amounts detected.")
-
-    # --------------------------------------------------
-    # RAW DATA
-    # --------------------------------------------------
-    st.subheader("📄 Cleaned Daily Aggregated Data")
+    st.subheader("📄 Cleaned Monthly Data")
     st.dataframe(daily, use_container_width=True)
