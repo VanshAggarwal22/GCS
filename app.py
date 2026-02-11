@@ -145,11 +145,13 @@ if page == "Daily Dashboard":
             if "SHIFT" not in df.columns:
                 st.error("SHIFT column not found.")
             else:
-                # Remove TOTAL dependency
-                shift_data = df[df["SHIFT"].astype(str).str.upper().isin(["A", "B", "C"])]
+                # Exclude TOTAL row if present
+                shift_data = df[
+                    ~df["SHIFT"].astype(str).str.upper().str.contains("TOTAL", na=False)
+                ]
 
                 if shift_data.empty:
-                    st.error("No shift data found.")
+                    st.error("No usable shift data found.")
                 else:
                     totals = shift_data.sum(numeric_only=True)
 
