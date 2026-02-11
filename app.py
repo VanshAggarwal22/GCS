@@ -119,7 +119,7 @@ if page == "Daily Link Entry":
 
 
 # ==================================================
-# 2️⃣ DAILY DASHBOARD (Enhanced KPIs + UI)
+# 2️⃣ DAILY DASHBOARD (FINAL CORRECT VERSION)
 # ==================================================
 if page == "Daily Dashboard":
 
@@ -142,38 +142,86 @@ if page == "Daily Dashboard":
             st.subheader("📄 Daily Raw Data")
             st.dataframe(df, use_container_width=True)
 
+            # -------------------------------------------------
+            # Detect Numeric Columns
+            # -------------------------------------------------
             numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
 
             if not numeric_cols:
-                st.warning("No numeric columns found for KPI calculation.")
+                st.warning("No numeric columns found.")
             else:
 
-                totals = df[numeric_cols].sum()
+                # ---------------------------------------------
+                # Remove columns containing TOTAL (avoid double count)
+                # ---------------------------------------------
+                base_numeric_cols = [
+                    col for col in numeric_cols
+                    if "TOTAL" not in str(col).upper()
+                ]
 
+                totals = df[base_numeric_cols].sum()
+
+                # ---------------------------------------------
+                # Helper to find column by keyword
+                # ---------------------------------------------
+                def find_column(keyword):
+                    for col in df.columns:
+                        if keyword in str(col).upper():
+                            return col
+                    return None
+
+                qty_col = find_column("QTY")
+                sale_col = find_column("SALE")
+                cash_col = find_column("CASH")
+                paytm_col = find_column("PAYTM")
+                credit_col = find_column("CREDIT")
+                atm_col = find_column("ATM")
+                collection_col = find_column("TOTAL COLLECTION")
+
+                # ---------------------------------------------
+                # KPI SECTION
+                # ---------------------------------------------
                 st.divider()
                 st.subheader("📊 Key Performance Indicators")
 
-                cols = st.columns(min(5, len(numeric_cols)))
+                k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
 
-                for i, col in enumerate(numeric_cols[:5]):
-                    cols[i].metric(
-                        label=col,
-                        value=f"{totals[col]:,.0f}"
-                    )
+                k1.metric("🔥 Gas Sold (KG)",
+                          f"{totals.get(qty_col, 0):,.0f}" if qty_col else "0")
 
-                # -----------------------------------
-                # Payment Mix Pie (if applicable)
-                # -----------------------------------
-                payment_cols = [
-                    col for col in numeric_cols
-                    if any(word in col.upper() for word in ["CASH", "PAYTM", "CREDIT"])
-                ]
+                k2.metric("💰 Sale Amount (₹)",
+                          f"{totals.get(sale_col, 0):,.0f}" if sale_col else "0")
+
+                k3.metric("💵 Cash (₹)",
+                          f"{totals.get(cash_col, 0):,.0f}" if cash_col else "0")
+
+                k4.metric("📲 Paytm (₹)",
+                          f"{totals.get(paytm_col, 0):,.0f}" if paytm_col else "0")
+
+                k5.metric("💳 Credit (₹)",
+                          f"{totals.get(credit_col, 0):,.0f}" if credit_col else "0")
+
+                k6.metric("🏧 ATM (₹)",
+                          f"{totals.get(atm_col, 0):,.0f}" if atm_col else "0")
+
+                k7.metric("💼 Total Collection (₹)",
+                          f"{df[collection_col].sum():,.0f}" if collection_col else "0")
+
+                # ---------------------------------------------
+                # Payment Mix Pie Chart
+                # ---------------------------------------------
+                payment_cols = []
+
+                for col in [cash_col, paytm_col, credit_col, atm_col]:
+                    if col and col in df.columns:
+                        payment_cols.append(col)
 
                 if payment_cols:
+
                     st.divider()
                     st.subheader("💳 Payment Mix")
 
-                    payment_data = totals[payment_cols].reset_index()
+                    payment_data = df[payment_cols].sum().reset_index()
                     payment_data.columns = ["Mode", "Amount"]
 
                     fig_pie = px.pie(
@@ -185,12 +233,12 @@ if page == "Daily Dashboard":
 
                     st.plotly_chart(fig_pie, use_container_width=True)
 
-                # -----------------------------------
-                # Shift Comparison (if first column = SHIFT)
-                # -----------------------------------
+                # ---------------------------------------------
+                # Shift Comparison (if SHIFT exists)
+                # ---------------------------------------------
                 if "SHIFT" in df.columns:
 
-                    shift_numeric = df.set_index("SHIFT")[numeric_cols]
+                    shift_numeric = df.set_index("SHIFT")[base_numeric_cols]
 
                     st.divider()
                     st.subheader("📊 Shift Comparison")
@@ -198,7 +246,7 @@ if page == "Daily Dashboard":
                     fig_bar = px.bar(
                         shift_numeric.reset_index(),
                         x="SHIFT",
-                        y=numeric_cols,
+                        y=base_numeric_cols,
                         barmode="group"
                     )
 
