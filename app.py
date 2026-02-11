@@ -122,7 +122,7 @@ if page == "Daily Link Entry":
 
 
 # ==================================================
-# 2️⃣ DAILY DASHBOARD
+# 2️⃣ DAILY DASHBOARD (FIXED - NO TOTAL DEPENDENCY)
 # ==================================================
 if page == "Daily Dashboard":
 
@@ -145,15 +145,16 @@ if page == "Daily Dashboard":
             if "SHIFT" not in df.columns:
                 st.error("SHIFT column not found.")
             else:
-                total_row = df[df["SHIFT"].astype(str).str.upper() == "TOTAL"]
+                # Remove TOTAL dependency
+                shift_data = df[df["SHIFT"].astype(str).str.upper().isin(["A", "B", "C"])]
 
-                if total_row.empty:
-                    st.error("TOTAL row not found.")
+                if shift_data.empty:
+                    st.error("No shift data found.")
                 else:
-                    total_row = total_row.iloc[0]
+                    totals = shift_data.sum(numeric_only=True)
 
                     def safe(col):
-                        return total_row[col] if col in total_row else 0
+                        return totals[col] if col in totals else 0
 
                     k1, k2, k3, k4, k5 = st.columns(5)
 
@@ -166,7 +167,7 @@ if page == "Daily Dashboard":
                     st.divider()
 
                     st.subheader("📄 Shift Breakdown")
-                    st.dataframe(df, use_container_width=True)
+                    st.dataframe(shift_data, use_container_width=True)
 
 
 # ==================================================
