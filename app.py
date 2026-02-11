@@ -1,65 +1,52 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import re
 import plotly.express as px
-from datetime import timedelta
+import re
+import numpy as np
 
-st.set_page_config(page_title="Production Intelligence Dashboard", layout="wide")
+# --------------------------------------------------
+# PAGE CONFIG
+# --------------------------------------------------
+st.set_page_config(page_title="CNG Intelligence Dashboard", layout="wide")
 
-# =====================================================
-# SAFE SHEET ID EXTRACTION (ULTRA ROBUST)
-# =====================================================
+# --------------------------------------------------
+# SESSION STATE STORAGE
+# --------------------------------------------------
+if "daily_links" not in st.session_state:
+    st.session_state.daily_links = {}
 
+if "monthly_links" not in st.session_state:
+    st.session_state.monthly_links = {}
+
+# --------------------------------------------------
+# HELPER: EXTRACT SHEET ID FROM LINK
+# --------------------------------------------------
 def extract_sheet_id(link):
-    if not link:
-        return None
+    match = re.search(r"/d/([a-zA-Z0-9-_]+)", link)
+    return match.group(1) if match else None
 
-    try:
-        if "docs.google.com" not in link:
-            return None
-
-        # Split by /d/ and take the ID
-        parts = link.split("/d/")
-        if len(parts) < 2:
-            return None
-
-        sheet_id = parts[1].split("/")[0]
-        return sheet_id.strip()
-
-    except:
-        return None
-
-
-# =====================================================
-# LOAD GOOGLE SHEET
-# =====================================================
-
-def load_google_sheet(link):
+# --------------------------------------------------
+# LOAD & CLEAN FUNCTION (YOUR WORKING LOGIC)
+# --------------------------------------------------
+def load_sheet_from_link(link):
 
     sheet_id = extract_sheet_id(link)
 
     if not sheet_id:
-        st.error("Invalid Google Sheet link format.")
+        st.error("Invalid Google Sheet link.")
         return None
 
     csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
 
     try:
-        df = pd.read_csv(csv_url)
-    except Exception as e:
-        st.error("Unable to fetch sheet.")
-        st.write("Possible reasons:")
-        st.write("- Sheet is not public")
-        st.write("- Invalid link")
-        st.write("- Internet restriction")
+        raw = pd.read_csv(csv_url, header=2)
+    except:
+        st.error("Unable to fetch sheet. Make sure it is public (Anyone with link → Viewer).")
         return None
 
-    if df.empty:
-        st.error("Sheet loaded but empty.")
-        return None
+    raw.columns = raw.iloc[0]
+    df = raw.iloc[1:].copy()
 
-    # Clean column names
     df.columns = (
         df.columns.astype(str)
         .str.strip()
@@ -67,32 +54,37 @@ def load_google_sheet(link):
         .str.replace("\n", " ")
     )
 
-    # Remove empty rows
-    df = df.dropna(how="all")
+    # Make unique
+    def make_unique(cols):
+        seen = {}
+        new_cols = []
+        for col in cols:
+            if col not in seen:
+                seen[col] = 0
+                new_cols.append(col)
+            else:
+                seen[col] += 1
+                new_cols.append(f"{col}_{seen[col]}")
+        return new_cols
 
-    # Detect DATE column automatically
-    date_col = None
+    df.columns = make_unique(df.columns)
+
+    # Filter shift rows
+    if "SHIFT" in df.columns:
+        df["SHIFT"] = df["SHIFT"].astype(str).str.strip()
+        df = df[df["SHIFT"].isin(["A", "B", "C"])]
+
+    # Fix date
+    if "DATE" in df.columns:
+        df["DATE"] = df["DATE"].ffill()
+        df["DATE"] = pd.to_datetime(df["DATE"], dayfirst=True, errors="coerce")
+        df = df.dropna(subset=["DATE"])
+
+    # Clean numeric
     for col in df.columns:
-        if "DATE" in col:
-            date_col = col
-            break
-
-    if not date_col:
-        st.error("No DATE column detected.")
-        st.write("Detected columns:", df.columns.tolist())
-        return None
-
-    df.rename(columns={date_col: "DATE"}, inplace=True)
-
-    df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce", dayfirst=True)
-    df = df.dropna(subset=["DATE"])
-
-    # Convert numeric columns
-    for col in df.columns:
-        if col != "DATE":
+        if col not in ["DATE", "SHIFT"]:
             df[col] = (
-                df[col]
-                .astype(str)
+                df[col].astype(str)
                 .str.replace(",", "", regex=False)
                 .replace("nan", "0")
             )
@@ -100,225 +92,165 @@ def load_google_sheet(link):
 
     return df
 
-
-# =====================================================
-# SAFE GROUPBY
-# =====================================================
-
-def safe_groupby(df):
-    if df is None:
-        return None
-
-    if "DATE" not in df.columns:
-        return None
-
-    numeric_cols = df.select_dtypes(include=np.number).columns
-
-    if len(numeric_cols) == 0:
-        st.error("No numeric columns found.")
-        return None
-
-    grouped = df.groupby("DATE", as_index=False)[numeric_cols].sum()
-    return grouped
-
-
-# =====================================================
-# FORECAST (Moving Average Based)
-# =====================================================
-
-def forecast_next_7_days(df):
-
-    if df is None or len(df) < 3:
-        return None
-
-    df = df.sort_values("DATE")
-    last_date = df["DATE"].max()
-    last_7 = df.tail(7)
-
-    forecast_rows = []
-
-    for i in range(1, 8):
-        new_row = {"DATE": last_date + timedelta(days=i)}
-
-        for col in df.select_dtypes(include=np.number).columns:
-            new_row[col] = last_7[col].mean()
-
-        forecast_rows.append(new_row)
-
-    return pd.DataFrame(forecast_rows)
-
-
-# =====================================================
-# ALERT SYSTEM
-# =====================================================
-
-def detect_alerts(df):
-
-    alerts = []
-
-    for col in df.select_dtypes(include=np.number).columns:
-        mean = df[col].mean()
-        std = df[col].std()
-
-        latest = df[col].iloc[-1]
-
-        if latest > mean + 2 * std:
-            alerts.append(f"⚠️ Spike detected in {col}")
-        elif latest < mean - 2 * std:
-            alerts.append(f"⚠️ Drop detected in {col}")
-
-    return alerts
-
-
-# =====================================================
-# SIDEBAR
-# =====================================================
-
-st.sidebar.title("Navigation")
+# --------------------------------------------------
+# SIDEBAR NAVIGATION
+# --------------------------------------------------
+st.sidebar.title("📊 Navigation")
 
 page = st.sidebar.radio(
-    "Select Page",
+    "Select View",
     [
-        "Add Daily Sheet",
+        "Daily Link Entry",
         "Daily Dashboard",
-        "Add Monthly Sheet",
+        "Monthly Link Manager",
         "Monthly Dashboard"
     ]
 )
 
-if "daily_link" not in st.session_state:
-    st.session_state.daily_link = None
+# ==================================================
+# 1️⃣ DAILY LINK ENTRY
+# ==================================================
+if page == "Daily Link Entry":
 
-if "monthly_links" not in st.session_state:
-    st.session_state.monthly_links = []
+    st.title("📅 Add Daily Sheet Link")
 
-
-# =====================================================
-# ADD DAILY
-# =====================================================
-
-if page == "Add Daily Sheet":
-
-    st.title("Add Daily Google Sheet")
-
-    link = st.text_input("Paste Full Daily Sheet Link")
+    selected_date = st.date_input("Select Date")
+    link = st.text_input("Paste Full Google Sheet Link")
 
     if st.button("Save Daily Link"):
-        st.session_state.daily_link = link
-        st.success("Daily link saved.")
+        if link:
+            st.session_state.daily_links[str(selected_date)] = link
+            st.success("Daily link saved successfully")
+
+    st.subheader("Saved Daily Links")
+    st.write(st.session_state.daily_links)
 
 
-# =====================================================
-# DAILY DASHBOARD
-# =====================================================
+# ==================================================
+# 2️⃣ DAILY DASHBOARD
+# ==================================================
+if page == "Daily Dashboard":
 
-elif page == "Daily Dashboard":
+    st.title("📈 Daily Operations Dashboard")
 
-    st.title("Daily Analytics Dashboard")
-
-    if not st.session_state.daily_link:
-        st.warning("Add daily sheet first.")
-        st.stop()
-
-    df = load_google_sheet(st.session_state.daily_link)
-    daily = safe_groupby(df)
-
-    if daily is None:
-        st.stop()
-
-    total = daily.select_dtypes(include=np.number).sum().sum()
-    avg = daily.select_dtypes(include=np.number).sum(axis=1).mean()
-
-    c1, c2 = st.columns(2)
-    c1.metric("Total Production", f"{total:,.0f}")
-    c2.metric("Average Per Day", f"{avg:,.0f}")
-
-    for col in daily.select_dtypes(include=np.number).columns:
-        fig = px.line(daily, x="DATE", y=col, title=f"{col} Trend")
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("7 Day Forecast")
-    forecast = forecast_next_7_days(daily)
-    if forecast is not None:
-        st.dataframe(forecast)
-
-    st.subheader("Alerts")
-    alerts = detect_alerts(daily)
-
-    if alerts:
-        for a in alerts:
-            st.error(a)
+    if not st.session_state.daily_links:
+        st.warning("No daily links added yet.")
     else:
-        st.success("No abnormal activity.")
+        selected_date = st.selectbox(
+            "Select Date",
+            list(st.session_state.daily_links.keys())
+        )
+
+        link = st.session_state.daily_links[selected_date]
+
+        df = load_sheet_from_link(link)
+
+        if df is not None:
+
+            daily = df.groupby("DATE", as_index=False).sum(numeric_only=True)
+
+            def safe(col):
+                return daily[col].sum() if col in daily.columns else 0
+
+            k1, k2, k3, k4, k5 = st.columns(5)
+
+            k1.metric("🔥 Gas Sold (KG)", f"{safe('TOTAL DSR QTY. KG'):,.0f}")
+            k2.metric("💳 Credit (₹)", f"{safe('CREDIT SALE (RS.)'):,.0f}")
+            k3.metric("💰 Paytm (₹)", f"{safe('PAYTM'):,.0f}")
+            k4.metric("🏦 Cash Deposit (₹)", f"{safe('CASH DEPOSIIT IN BANK'):,.0f}")
+            k5.metric("⚠️ Short Amount (₹)", f"{safe('SHORT AMOUNT'):,.0f}")
+
+            st.divider()
+
+            if "TOTAL DSR QTY. KG" in daily.columns:
+                fig = px.bar(
+                    daily,
+                    x="DATE",
+                    y="TOTAL DSR QTY. KG",
+                    title="Gas Sold"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.subheader("📄 Daily Data")
+            st.dataframe(daily, use_container_width=True)
 
 
-# =====================================================
-# ADD MONTHLY
-# =====================================================
+# ==================================================
+# 3️⃣ MONTHLY LINK MANAGER
+# ==================================================
+if page == "Monthly Link Manager":
 
-elif page == "Add Monthly Sheet":
+    st.title("📆 Add Monthly Sheet Link")
 
-    st.title("Add Monthly Google Sheet")
+    month_name = st.text_input("Enter Month Name (Example: March 2026)")
+    link = st.text_input("Paste Full Google Sheet Link")
 
-    link = st.text_input("Paste Full Monthly Sheet Link")
+    if st.button("Save Monthly Link"):
+        if month_name and link:
+            st.session_state.monthly_links[month_name] = link
+            st.success("Monthly link saved successfully")
 
-    if st.button("Add Month"):
-        st.session_state.monthly_links.append(link)
-        st.success("Monthly link added.")
-
-    st.write("Current Monthly Links:")
+    st.subheader("Saved Monthly Links")
     st.write(st.session_state.monthly_links)
 
 
-# =====================================================
-# MONTHLY DASHBOARD
-# =====================================================
+# ==================================================
+# 4️⃣ MONTHLY DASHBOARD
+# ==================================================
+if page == "Monthly Dashboard":
 
-elif page == "Monthly Dashboard":
-
-    st.title("Monthly Analytics Dashboard")
+    st.title("🚀 Monthly Operations Dashboard")
 
     if not st.session_state.monthly_links:
-        st.warning("Add monthly sheets first.")
-        st.stop()
-
-    all_data = []
-
-    for link in st.session_state.monthly_links:
-        df = load_google_sheet(link)
-        grouped = safe_groupby(df)
-
-        if grouped is not None:
-            all_data.append(grouped)
-
-    if not all_data:
-        st.error("No valid monthly data loaded.")
-        st.stop()
-
-    combined = pd.concat(all_data)
-    combined = combined.groupby("DATE", as_index=False).sum()
-
-    total = combined.select_dtypes(include=np.number).sum().sum()
-    avg = combined.select_dtypes(include=np.number).sum(axis=1).mean()
-
-    c1, c2 = st.columns(2)
-    c1.metric("Total Production", f"{total:,.0f}")
-    c2.metric("Average Per Day", f"{avg:,.0f}")
-
-    for col in combined.select_dtypes(include=np.number).columns:
-        fig = px.line(combined, x="DATE", y=col, title=f"{col} Monthly Trend")
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("7 Day Forecast")
-    forecast = forecast_next_7_days(combined)
-    if forecast is not None:
-        st.dataframe(forecast)
-
-    st.subheader("Alerts")
-    alerts = detect_alerts(combined)
-
-    if alerts:
-        for a in alerts:
-            st.error(a)
+        st.warning("No monthly links added yet.")
     else:
-        st.success("No abnormal monthly activity.")
+
+        selected_month = st.selectbox(
+            "Select Month",
+            list(st.session_state.monthly_links.keys())
+        )
+
+        link = st.session_state.monthly_links[selected_month]
+
+        df = load_sheet_from_link(link)
+
+        if df is not None:
+
+            daily = df.groupby("DATE", as_index=False).sum(numeric_only=True)
+
+            # Date filter
+            date_range = st.sidebar.date_input(
+                "Select Date Range",
+                [daily["DATE"].min(), daily["DATE"].max()]
+            )
+
+            daily = daily[
+                (daily["DATE"] >= pd.to_datetime(date_range[0])) &
+                (daily["DATE"] <= pd.to_datetime(date_range[1]))
+            ]
+
+            def safe(col):
+                return daily[col].sum() if col in daily.columns else 0
+
+            k1, k2, k3, k4, k5 = st.columns(5)
+
+            k1.metric("🔥 Total Gas (KG)", f"{safe('TOTAL DSR QTY. KG'):,.0f}")
+            k2.metric("💳 Credit (₹)", f"{safe('CREDIT SALE (RS.)'):,.0f}")
+            k3.metric("💰 Paytm (₹)", f"{safe('PAYTM'):,.0f}")
+            k4.metric("🏦 Cash Deposit (₹)", f"{safe('CASH DEPOSIIT IN BANK'):,.0f}")
+            k5.metric("⚠️ Short Amount (₹)", f"{safe('SHORT AMOUNT'):,.0f}")
+
+            st.divider()
+
+            if "TOTAL DSR QTY. KG" in daily.columns:
+                fig = px.line(
+                    daily,
+                    x="DATE",
+                    y="TOTAL DSR QTY. KG",
+                    markers=True,
+                    title="Monthly Gas Trend"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.subheader("📄 Monthly Data")
+            st.dataframe(daily, use_container_width=True)
