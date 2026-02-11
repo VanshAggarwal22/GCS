@@ -1,219 +1,254 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+import numpy as np
+from datetime import datetime, timedelta
+from sklearn.linear_model import LinearRegression
 
-# ==========================
-# PAGE CONFIG
-# ==========================
+# ======================================================
+# CONFIG
+# ======================================================
 st.set_page_config(
-    page_title="Fuel Station Daily Dashboard",
-    layout="wide"
+    page_title="Fuel Station Analytics Suite",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-SHEET_ID = "1_NDdrYnUJnFoJHwc5dZUy5bM920UqMmxP2dUJErGtNA"
+# ======================================================
+# CONSTANTS
+# ======================================================
+DAILY_MASTER_SHEET = "1_NDdrYnUJnFoJHwc5dZUy5bM920UqMmxP2dUJErGtNA"
 
-# ==========================
-# GOOGLE SHEET FETCH
-# ==========================
+MONTHLY_SHEETS = {
+    "January 2026": "1pFPzyxib9rG5dune9FgUYO91Bp1zL2StO6ftxDBPRJM",
+    "February 2026": "1bZBzVx1oJUXf4tBIpgJwJan8iwh7alz9CO9Z_5TMB3I"
+}
+
+# ======================================================
+# SESSION STATE
+# ======================================================
+if "daily_gid_map" not in st.session_state:
+    st.session_state.daily_gid_map = {}
+
+# ======================================================
+# UTILITIES
+# ======================================================
 @st.cache_data
-def load_sheet(sheet_gid: str) -> pd.DataFrame:
-    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={sheet_gid}"
-    df = pd.read_csv(url, header=None)
-    return df
+def load_daily_sheet(gid):
+    url = f"https://docs.google.com/spreadsheets/d/{DAILY_MASTER_SHEET}/export?format=csv&gid={gid}"
+    return pd.read_csv(url, header=None)
 
-# ==========================
-# HELPERS
-# ==========================
-def safe_value(df, r, c):
+@st.cache_data
+def load_monthly_sheet(sheet_id):
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+    return pd.read_csv(url, header=None)
+
+def safe(df, r, c):
     try:
         return df.iloc[r, c]
     except:
         return None
 
-def section_header(title):
-    st.markdown(f"### {title}")
+def header(title):
+    st.markdown(f"<h2 style='color:#2E4053'>{title}</h2>", unsafe_allow_html=True)
 
-# ==========================
-# SESSION STATE STORAGE
-# ==========================
-if "daily_sheets" not in st.session_state:
-    st.session_state.daily_sheets = {}
+# ======================================================
+# SIDEBAR NAVIGATION
+# ======================================================
+st.sidebar.title("⛽ Fuel Station Suite")
 
-# ==========================
-# SIDEBAR INPUT
-# ==========================
-st.sidebar.title("📅 Add / Select Daily Sheet")
-
-date_input = st.sidebar.text_input("Enter Date (e.g. 08.01.26)")
-gid_input = st.sidebar.text_input("Enter GID for this date")
-
-if st.sidebar.button("➕ Add / Update Date"):
-    if date_input and gid_input:
-        st.session_state.daily_sheets[date_input] = gid_input
-        st.sidebar.success(f"{date_input} added successfully!")
-
-# ==========================
-# DATE SELECTION
-# ==========================
-if len(st.session_state.daily_sheets) == 0:
-    st.warning("Please add at least one date and GID from the sidebar.")
-    st.stop()
-
-selected_date = st.sidebar.selectbox(
-    "Select Available Date",
-    list(st.session_state.daily_sheets.keys())
+page = st.sidebar.radio(
+    "Navigate",
+    ["📅 Add Daily GID",
+     "📊 Daily Dashboard",
+     "📈 Monthly Intelligence"]
 )
 
-selected_gid = st.session_state.daily_sheets[selected_date]
+# ======================================================
+# PAGE 1 — ADD DAILY GID
+# ======================================================
+if page == "📅 Add Daily GID":
 
-# ==========================
-# LOAD DATA
-# ==========================
-try:
-    df = load_sheet(selected_gid)
-except:
-    st.error("Failed to fetch data. Please check GID.")
-    st.stop()
+    header("Add Daily Sheet GID")
 
-# ==========================
-# HEADER
-# ==========================
-station_name = safe_value(df, 0, 0)
+    selected_date = st.date_input("Select Date", value=datetime.today())
+    gid = st.text_input("Enter GID")
 
-st.title("⛽ Fuel Station Daily Performance Dashboard")
-st.caption(f"📍 {station_name} | 📆 {selected_date}")
+    if st.button("Save"):
+        formatted = selected_date.strftime("%d.%m.%y")
+        st.session_state.daily_gid_map[formatted] = gid
+        st.success(f"Saved for {formatted}")
 
-# ==========================
-# KPI CARDS
-# ==========================
-k1, k2, k3, k4 = st.columns(4)
+    st.write("### Saved GIDs")
+    st.json(st.session_state.daily_gid_map)
 
-total_sale = safe_value(df, 5, 5)
-total_qty = safe_value(df, 5, 3)
-total_collection = safe_value(df, 18, 5)
-difference = safe_value(df, 18, 6)
+# ======================================================
+# PAGE 2 — DAILY DASHBOARD
+# ======================================================
+elif page == "📊 Daily Dashboard":
 
-k1.metric("💰 Total Sale (₹)", total_sale)
-k2.metric("⚖️ Total Quantity", total_qty)
-k3.metric("💵 Total Collection", total_collection)
-k4.metric("⚠️ Difference", difference)
+    header("Daily Performance Dashboard")
 
-st.divider()
+    if not st.session_state.daily_gid_map:
+        st.warning("Add at least one GID first.")
+        st.stop()
 
-# ==========================
-# SHIFT SUMMARY
-# ==========================
-section_header("🕒 Shift-wise Summary")
-
-shift_data = pd.DataFrame({
-    "Shift": ["A", "B", "C"],
-    "Quantity": [
-        safe_value(df, 7, 3),
-        safe_value(df, 10, 3),
-        safe_value(df, 13, 3)
-    ],
-    "Sale": [
-        safe_value(df, 7, 5),
-        safe_value(df, 10, 5),
-        safe_value(df, 13, 5)
-    ],
-    "Difference": [
-        safe_value(df, 7, 6),
-        safe_value(df, 10, 6),
-        safe_value(df, 13, 6)
-    ]
-})
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.dataframe(shift_data, use_container_width=True)
-
-with col2:
-    fig = px.bar(
-        shift_data,
-        x="Shift",
-        y="Sale",
-        text_auto=True,
-        title="Shift-wise Sale Distribution"
+    selected_date = st.selectbox(
+        "Select Date",
+        list(st.session_state.daily_gid_map.keys())
     )
-    st.plotly_chart(fig, use_container_width=True)
 
-st.divider()
+    df = load_daily_sheet(st.session_state.daily_gid_map[selected_date])
 
-# ==========================
-# PAYMENT BREAKDOWN
-# ==========================
-section_header("💳 Payment Mode Breakdown")
-
-payment_df = pd.DataFrame({
-    "Mode": ["Cash", "Paytm", "ATM", "Credit"],
-    "Amount": [
-        safe_value(df, 16, 5),
-        safe_value(df, 15, 5),
-        safe_value(df, 14, 5),
-        safe_value(df, 17, 5)
-    ]
-})
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.dataframe(payment_df, use_container_width=True)
-
-with col2:
-    fig = px.pie(
-        payment_df,
-        names="Mode",
-        values="Amount",
-        title="Payment Distribution"
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-st.divider()
-
-# ==========================
-# DISPENSER ANALYSIS
-# ==========================
-section_header("⛽ Dispenser-wise Analysis (Shift A Example)")
-
-dispenser_data = []
-start_row = 21  # Adjust if needed
-
-for i in range(start_row, start_row + 15):
-    if pd.isna(safe_value(df, i, 0)):
-        break
-    dispenser_data.append({
-        "Dispenser": safe_value(df, i, 0),
-        "Opening": safe_value(df, i, 1),
-        "Closing": safe_value(df, i, 2),
-        "Quantity": safe_value(df, i, 3),
-        "Sale": safe_value(df, i, 5)
+    # Extract Consolidated Section
+    shift_df = pd.DataFrame({
+        "Shift": ["A", "B", "C"],
+        "QTY": [safe(df,7,1), safe(df,9,1), safe(df,11,1)],
+        "SALE": [safe(df,7,2), safe(df,9,2), safe(df,11,2)],
+        "CASH": [safe(df,7,3), safe(df,9,3), safe(df,11,3)],
+        "PAYTM": [safe(df,7,4), safe(df,9,4), safe(df,11,4)],
+        "CREDIT": [safe(df,7,6), safe(df,9,6), safe(df,11,6)],
+        "DIFF": [safe(df,7,8), safe(df,9,8), safe(df,11,8)],
     })
 
-disp_df = pd.DataFrame(dispenser_data)
+    total_sale = safe(df,13,2)
+    total_diff = safe(df,13,8)
 
-col1, col2 = st.columns(2)
+    k1,k2,k3 = st.columns(3)
+    k1.metric("Total Sale ₹", total_sale)
+    k2.metric("Total Difference ₹", total_diff)
+    k3.metric("Total Quantity", safe(df,13,1))
 
-with col1:
-    st.dataframe(disp_df, use_container_width=True)
+    st.dataframe(shift_df, use_container_width=True)
 
-with col2:
-    fig = px.line(
-        disp_df,
-        x="Dispenser",
-        y="Quantity",
-        markers=True,
-        title="Dispenser Consumption"
-    )
+    fig = px.bar(shift_df, x="Shift", y="SALE", title="Shift Sales")
     st.plotly_chart(fig, use_container_width=True)
 
-st.divider()
+# ======================================================
+# PAGE 3 — MONTHLY INTELLIGENCE
+# ======================================================
+elif page == "📈 Monthly Intelligence":
 
-# ==========================
-# RAW DATA VIEW
-# ==========================
-with st.expander("🔍 View Raw Sheet Data"):
-    st.dataframe(df, use_container_width=True)
+    header("Monthly Intelligence Engine")
 
-st.caption("Live data fetched using dynamic GID input • Streamlit Dashboard")
+    selected_month = st.selectbox("Select Month", list(MONTHLY_SHEETS.keys()))
+    raw = load_monthly_sheet(MONTHLY_SHEETS[selected_month]).fillna("")
+
+    parsed = []
+
+    for i in range(len(raw)):
+        if str(raw.iloc[i,0]).strip().upper() == "TOTAL":
+            try:
+                parsed.append({
+                    "Day": len(parsed)+1,
+                    "QTY": float(raw.iloc[i,1]),
+                    "SALE": float(raw.iloc[i,2]),
+                    "CASH": float(raw.iloc[i,3]),
+                    "PAYTM": float(raw.iloc[i,4]),
+                    "ATM": float(raw.iloc[i,5]),
+                    "CREDIT": float(raw.iloc[i,6]),
+                    "COLLECTION": float(raw.iloc[i,7]),
+                    "DIFF": float(raw.iloc[i,8])
+                })
+            except:
+                pass
+
+    if not parsed:
+        st.error("Could not parse monthly structure.")
+        st.stop()
+
+    monthly_df = pd.DataFrame(parsed)
+
+    # ======================================================
+    # KPIs
+    # ======================================================
+    k1,k2,k3,k4 = st.columns(4)
+    k1.metric("Monthly Sale ₹", round(monthly_df["SALE"].sum(),2))
+    k2.metric("Avg Daily Sale ₹", round(monthly_df["SALE"].mean(),2))
+    k3.metric("Highest Day ₹", round(monthly_df["SALE"].max(),2))
+    k4.metric("Total Diff ₹", round(monthly_df["DIFF"].sum(),2))
+
+    st.divider()
+
+    # ======================================================
+    # 7-DAY FORECAST
+    # ======================================================
+    st.subheader("📊 7-Day Sales Forecast")
+
+    X = np.array(monthly_df.index).reshape(-1,1)
+    y = monthly_df["SALE"].values
+
+    model = LinearRegression()
+    model.fit(X,y)
+
+    future_days = np.array(range(len(monthly_df), len(monthly_df)+7)).reshape(-1,1)
+    forecast = model.predict(future_days)
+
+    forecast_df = pd.DataFrame({
+        "Future Day": range(len(monthly_df)+1, len(monthly_df)+8),
+        "Forecasted Sale": forecast
+    })
+
+    fig_forecast = go.Figure()
+    fig_forecast.add_trace(go.Scatter(
+        x=monthly_df["Day"],
+        y=monthly_df["SALE"],
+        mode='lines+markers',
+        name='Actual'
+    ))
+    fig_forecast.add_trace(go.Scatter(
+        x=forecast_df["Future Day"],
+        y=forecast_df["Forecasted Sale"],
+        mode='lines+markers',
+        name='Forecast'
+    ))
+    st.plotly_chart(fig_forecast, use_container_width=True)
+
+    # ======================================================
+    # ALERT SYSTEM
+    # ======================================================
+    st.subheader("🚨 Short / Excess Alert System")
+
+    threshold = monthly_df["DIFF"].std() * 2
+    alerts = monthly_df[abs(monthly_df["DIFF"]) > threshold]
+
+    if not alerts.empty:
+        st.error("Abnormal Short/Excess Detected")
+        st.dataframe(alerts)
+    else:
+        st.success("No abnormal short/excess detected")
+
+    # ======================================================
+    # PROFIT ESTIMATION MODULE
+    # ======================================================
+    st.subheader("💰 Profit Estimation")
+
+    profit_margin = st.slider("Estimated Profit per Unit (₹)", 0.0, 10.0, 2.0)
+
+    monthly_df["Estimated Profit"] = monthly_df["QTY"] * profit_margin
+
+    st.metric("Estimated Monthly Profit ₹",
+              round(monthly_df["Estimated Profit"].sum(),2))
+
+    fig_profit = px.bar(monthly_df,
+                        x="Day",
+                        y="Estimated Profit",
+                        title="Daily Estimated Profit")
+
+    st.plotly_chart(fig_profit, use_container_width=True)
+
+    # ======================================================
+    # Correlation
+    # ======================================================
+    st.subheader("📈 Correlation Matrix")
+
+    corr = monthly_df.corr()
+    fig_corr = go.Figure(
+        data=go.Heatmap(
+            z=corr.values,
+            x=corr.columns,
+            y=corr.columns
+        )
+    )
+    st.plotly_chart(fig_corr, use_container_width=True)
