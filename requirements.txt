@@ -3,4 +3,8 @@ pandas
 plotly
 gspread
 google-auth
-
+numpy
+streamlit
+openpyxl
+scikit-learn
+plotly
