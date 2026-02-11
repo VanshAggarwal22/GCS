@@ -1,262 +1,203 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.express as px
-from datetime import datetime, timedelta
+import re
+from datetime import date
 
-st.set_page_config(page_title="Operations Intelligence Dashboard", layout="wide")
+# -------------------------
+# CONFIG
+# -------------------------
+st.set_page_config(page_title="Gas Sales Dashboard", layout="wide")
 
-# ================= CONFIG =================
+GOOGLE_SHEET_ID = "1_NDdrYnUJnFoJHwc5pZUy5bM920UqMmxP2dUJErGtNA"
+GID = "1671830441"
 
-MONTHLY_SHEETS = {
-    "January 2026": "1pFPzyxib9rG5dune9FgUYO91Bp1zL2StO6ftxDBPRJM",
-    "February 2026": "1bZBzVx1oJUXf4tBIpgJwJan8iwh7alz9CO9Z_5TMB3I"
-}
+CSV_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv&gid={GID}"
 
-if "daily_map" not in st.session_state:
-    st.session_state.daily_map = {}
+# -------------------------
+# DATA LOADER
+# -------------------------
+@st.cache_data(show_spinner=False)
+def load_data():
+    df = pd.read_csv(CSV_URL, header=None)
 
-# ================= LOAD GOOGLE SHEET =================
+    # Drop fully empty rows
+    df.dropna(how="all", inplace=True)
 
-def load_google_sheet(sheet_id, gid="0"):
-    try:
-        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-        return pd.read_csv(url)
-    except Exception as e:
-        st.error(f"Fetch failed: {e}")
-        return None
+    # Assume header row is the first non-empty row
+    header_row_idx = df.notna().all(axis=1).idxmax()
+    headers = df.loc[header_row_idx].astype(str).str.strip()
+    df = df.loc[header_row_idx + 1:]
+    df.columns = headers
 
-# ================= PARSER =================
+    # De-duplicate column names
+    df.columns = pd.Index(pd.io.parsers.ParserBase({"names": df.columns})._maybe_dedup_names(df.columns))
 
-def parse_structure(df):
+    # Strip spaces
+    df.columns = df.columns.str.upper().str.strip()
 
-    if df is None:
-        return None
+    return df.reset_index(drop=True)
 
-    df = df.dropna(how="all")
+df = load_data()
 
-    # Detect date column
-    date_col = None
+# -------------------------
+# COLUMN DETECTION
+# -------------------------
+def find_col(patterns):
     for col in df.columns:
-        if "date" in str(col).lower():
-            date_col = col
-            break
-
-    if date_col is None:
-        return None
-
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-    df = df.dropna(subset=[date_col])
-
-    df = df.rename(columns={date_col: "Date"})
-
-    for col in df.columns:
-        if col != "Date":
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df = df.fillna(0)
-    return df
-
-# ================= FORECAST =================
-
-def forecast_next_7_days(df, column):
-
-    df = df.sort_values("Date")
-    df["Day"] = (df["Date"] - df["Date"].min()).dt.days
-
-    X = df["Day"].values
-    y = df[column].values
-
-    if len(X) < 2:
-        return None
-
-    slope, intercept = np.polyfit(X, y, 1)
-
-    last_day = df["Day"].max()
-
-    future_days = np.arange(last_day + 1, last_day + 8)
-    future_vals = slope * future_days + intercept
-
-    future_dates = [df["Date"].max() + timedelta(days=i) for i in range(1, 8)]
-
-    return pd.DataFrame({"Date": future_dates, "Forecast": future_vals})
-
-# ================= ALERT =================
-
-def generate_alerts(df):
-
-    alerts = []
-
-    for col in df.columns:
-        if "short" in col.lower() or "excess" in col.lower():
-
-            mean = df[col].mean()
-            std = df[col].std()
-
-            abnormal = df[df[col] > mean + 2 * std]
-
-            if not abnormal.empty:
-                alerts.append(f"Abnormal {col} detected")
-
-    return alerts
-
-# ================= PROFIT =================
-
-def estimate_profit(df):
-
-    sales = None
-    purchase = None
-
-    for col in df.columns:
-        if "sale" in col.lower():
-            sales = col
-        if "purchase" in col.lower() or "cost" in col.lower():
-            purchase = col
-
-    if sales and purchase:
-        return (df[sales] - df[purchase]).sum()
-
+        for p in patterns:
+            if re.search(p, col):
+                return col
     return None
 
-# ================= SIDEBAR =================
+DATE_COL = find_col([r"DATE"])
+SHIFT_COL = find_col([r"SHIFT", r"A/B/C"])
+QTY_COL = find_col([r"QTY", r"KG"])
+CASH_COL = find_col([r"CASH"])
+RTGS_COL = find_col([r"RTGS"])
+PID_COL = find_col([r"PID"])
 
-st.sidebar.title("Navigation")
+required = {
+    "DATE": DATE_COL,
+    "SHIFT": SHIFT_COL,
+    "QTY": QTY_COL
+}
 
-page = st.sidebar.radio(
-    "Select Page",
-    ["Daily GID Entry", "Daily Dashboard", "Monthly Dashboard"]
+missing = [k for k, v in required.items() if v is None]
+if missing:
+    st.error(f"❌ Missing required columns: {missing}")
+    st.stop()
+
+# -------------------------
+# CLEAN DATA
+# -------------------------
+df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
+df = df.dropna(subset=[DATE_COL])
+
+if df.empty:
+    st.error("❌ No valid DATE values found.")
+    st.stop()
+
+# Normalize shifts
+df[SHIFT_COL] = df[SHIFT_COL].astype(str).str.upper().str.strip()
+
+# Convert numerics safely
+for c in [QTY_COL, CASH_COL, RTGS_COL, PID_COL]:
+    if c:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+# -------------------------
+# SIDEBAR FILTERS (SAFE)
+# -------------------------
+min_date = df[DATE_COL].min().date()
+max_date = df[DATE_COL].max().date()
+
+date_range = st.sidebar.date_input(
+    "Date Range",
+    value=(min_date, max_date),
+    min_value=min_date,
+    max_value=max_date
 )
 
-# =====================================================
-# PAGE 1 DAILY ENTRY
-# =====================================================
+if len(date_range) != 2:
+    st.stop()
 
-if page == "Daily GID Entry":
+start_date, end_date = date_range
 
-    st.title("Daily Mapping Entry")
+mask = (
+    (df[DATE_COL].dt.date >= start_date) &
+    (df[DATE_COL].dt.date <= end_date)
+)
+fdf = df.loc[mask].copy()
 
-    date = st.date_input("Select Date")
+# -------------------------
+# TABS
+# -------------------------
+tab1, tab2, tab3 = st.tabs([
+    "📊 Daily Overview",
+    "🔁 Shift-wise Analysis",
+    "📅 Daily Metrics"
+])
 
-    month = st.selectbox("Select Month Sheet", list(MONTHLY_SHEETS.keys()))
-    gid = st.text_input("Enter GID")
+# =========================
+# TAB 1 — DAILY OVERVIEW (UNCHANGED LOGIC)
+# =========================
+with tab1:
+    st.subheader("Daily Gas Sales")
 
-    if st.button("Save Mapping"):
+    daily = fdf.groupby(fdf[DATE_COL].dt.date).agg(
+        TOTAL_QTY=(QTY_COL, "sum"),
+        TOTAL_CASH=(CASH_COL, "sum") if CASH_COL else ("DATE", "count"),
+        TOTAL_RTGS=(RTGS_COL, "sum") if RTGS_COL else ("DATE", "count"),
+        TOTAL_PID=(PID_COL, "sum") if PID_COL else ("DATE", "count"),
+    ).reset_index().rename(columns={DATE_COL: "DATE"})
 
-        st.session_state.daily_map[str(date)] = {
-            "sheet_id": MONTHLY_SHEETS[month],
-            "gid": gid
-        }
+    fig = px.line(
+        daily,
+        x="DATE",
+        y="TOTAL_QTY",
+        markers=True,
+        title="Daily Gas Sales (KG)"
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-        st.success("Saved!")
+    st.dataframe(daily, use_container_width=True)
 
-    st.write(st.session_state.daily_map)
+# =========================
+# TAB 2 — SHIFT-WISE ANALYSIS (FIXED)
+# =========================
+with tab2:
+    st.subheader("Shift-wise Performance")
 
-# =====================================================
-# PAGE 2 DAILY DASHBOARD
-# =====================================================
+    shift_daily = fdf.groupby(
+        [fdf[DATE_COL].dt.date, SHIFT_COL]
+    ).agg(
+        QTY=(QTY_COL, "sum"),
+        CASH=(CASH_COL, "sum") if CASH_COL else ("DATE", "count"),
+    ).reset_index().rename(columns={DATE_COL: "DATE"})
 
-if page == "Daily Dashboard":
+    fig2 = px.bar(
+        shift_daily,
+        x="DATE",
+        y="QTY",
+        color=SHIFT_COL,
+        barmode="group",
+        title="Shift-wise Gas Sales (KG)"
+    )
+    st.plotly_chart(fig2, use_container_width=True)
 
-    st.title("Daily Dashboard")
+    fig3 = px.bar(
+        shift_daily,
+        x="DATE",
+        y="CASH",
+        color=SHIFT_COL,
+        barmode="group",
+        title="Shift-wise Cash Collection"
+    )
+    st.plotly_chart(fig3, use_container_width=True)
 
-    if not st.session_state.daily_map:
-        st.warning("No mapping added yet")
+    st.dataframe(shift_daily, use_container_width=True)
 
-    else:
+# =========================
+# TAB 3 — DAILY METRICS (NEW)
+# =========================
+with tab3:
+    st.subheader("Daily Financial Metrics")
 
-        selected_date = st.selectbox(
-            "Select Date",
-            list(st.session_state.daily_map.keys())
-        )
+    metrics = fdf.groupby(fdf[DATE_COL].dt.date).agg(
+        TOTAL_QTY=(QTY_COL, "sum"),
+        TOTAL_CASH=(CASH_COL, "sum") if CASH_COL else ("DATE", "count"),
+        TOTAL_RTGS=(RTGS_COL, "sum") if RTGS_COL else ("DATE", "count"),
+        TOTAL_PID=(PID_COL, "sum") if PID_COL else ("DATE", "count"),
+    ).reset_index().rename(columns={DATE_COL: "DATE"})
 
-        mapping = st.session_state.daily_map[selected_date]
+    st.dataframe(metrics, use_container_width=True)
 
-        raw = load_google_sheet(mapping["sheet_id"], mapping["gid"])
-        df = parse_structure(raw)
-
-        if df is None:
-            st.error("Parsing failed")
-        else:
-
-            st.dataframe(df)
-
-            numeric = df.select_dtypes(include=np.number).columns
-
-            col1, col2, col3 = st.columns(3)
-
-            if len(numeric) > 0:
-                col1.metric("Total", int(df[numeric[0]].sum()))
-
-            if len(numeric) > 1:
-                col2.metric("Average", round(df[numeric[1]].mean(), 2))
-
-            profit = estimate_profit(df)
-            if profit:
-                col3.metric("Profit", round(profit, 2))
-
-# =====================================================
-# PAGE 3 MONTHLY DASHBOARD
-# =====================================================
-
-if page == "Monthly Dashboard":
-
-    st.title("Monthly Intelligence Dashboard")
-
-    month = st.selectbox("Select Month", list(MONTHLY_SHEETS.keys()))
-
-    sheet_id = MONTHLY_SHEETS[month]
-
-    raw = load_google_sheet(sheet_id)
-    df = parse_structure(raw)
-
-    if df is None:
-        st.error("Monthly parsing failed")
-    else:
-
-        st.dataframe(df)
-
-        numeric = df.select_dtypes(include=np.number).columns
-
-        st.subheader("KPIs")
-
-        kpi = st.columns(4)
-
-        if len(numeric) > 0:
-            kpi[0].metric("Total Volume", int(df[numeric[0]].sum()))
-
-        if len(numeric) > 1:
-            kpi[1].metric("Average Daily", round(df[numeric[1]].mean(), 2))
-
-        profit = estimate_profit(df)
-        if profit:
-            kpi[2].metric("Estimated Profit", round(profit, 2))
-
-        kpi[3].metric("Days", len(df))
-
-        st.subheader("Trend")
-
-        for col in numeric[:3]:
-            fig = px.line(df, x="Date", y=col)
-            st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("Forecast")
-
-        if len(numeric) > 0:
-            forecast = forecast_next_7_days(df, numeric[0])
-
-            if forecast is not None:
-
-                fig = px.line(df, x="Date", y=numeric[0])
-                fig.add_scatter(x=forecast["Date"], y=forecast["Forecast"], mode="lines")
-
-                st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("Alerts")
-
-        alerts = generate_alerts(df)
-
-        if alerts:
-            for a in alerts:
-                st.error(a)
-        else:
-            st.success("No abnormal activity")
+    fig4 = px.line(
+        metrics,
+        x="DATE",
+        y=["TOTAL_CASH", "TOTAL_RTGS", "TOTAL_PID"],
+        markers=True,
+        title="Daily Payment Breakdown"
+    )
+    st.plotly_chart(fig4, use_container_width=True)
