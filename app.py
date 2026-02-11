@@ -88,10 +88,10 @@ st.sidebar.title("📊 Navigation")
 page = st.sidebar.radio(
     "Select View",
     [
-        "Daily Link Entry",
         "Daily Dashboard",
-        "Monthly Link Manager",
-        "Monthly Dashboard"
+        "Daily Link Entry",
+        "Monthly Dashboard",
+        "Monthly Link Manager"
     ]
 )
 
