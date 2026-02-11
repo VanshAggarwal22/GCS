@@ -1,254 +1,298 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import numpy as np
+import plotly.express as px
 from datetime import datetime, timedelta
-from sklearn.linear_model import LinearRegression
 
-# ======================================================
+st.set_page_config(page_title="Operations Intelligence Dashboard",
+                   layout="wide")
+
+# ==============================
 # CONFIG
-# ======================================================
-st.set_page_config(
-    page_title="Fuel Station Analytics Suite",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# ======================================================
-# CONSTANTS
-# ======================================================
-DAILY_MASTER_SHEET = "1_NDdrYnUJnFoJHwc5dZUy5bM920UqMmxP2dUJErGtNA"
+# ==============================
 
 MONTHLY_SHEETS = {
     "January 2026": "1pFPzyxib9rG5dune9FgUYO91Bp1zL2StO6ftxDBPRJM",
     "February 2026": "1bZBzVx1oJUXf4tBIpgJwJan8iwh7alz9CO9Z_5TMB3I"
 }
 
-# ======================================================
-# SESSION STATE
-# ======================================================
 if "daily_gid_map" not in st.session_state:
     st.session_state.daily_gid_map = {}
 
-# ======================================================
-# UTILITIES
-# ======================================================
-@st.cache_data
-def load_daily_sheet(gid):
-    url = f"https://docs.google.com/spreadsheets/d/{DAILY_MASTER_SHEET}/export?format=csv&gid={gid}"
-    return pd.read_csv(url, header=None)
+# ==============================
+# UTIL FUNCTIONS
+# ==============================
 
-@st.cache_data
-def load_monthly_sheet(sheet_id):
-    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
-    return pd.read_csv(url, header=None)
+def load_google_sheet(sheet_id, gid="0"):
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    return pd.read_csv(url)
 
-def safe(df, r, c):
-    try:
-        return df.iloc[r, c]
-    except:
+
+def parse_structure(df):
+    df = df.dropna(how="all")
+
+    # Auto detect date column
+    date_col = None
+    for col in df.columns:
+        if "date" in str(col).lower():
+            date_col = col
+            break
+
+    if date_col is None:
+        df.columns = df.iloc[0]
+        df = df[1:]
+        for col in df.columns:
+            if "date" in str(col).lower():
+                date_col = col
+                break
+
+    if date_col is None:
         return None
 
-def header(title):
-    st.markdown(f"<h2 style='color:#2E4053'>{title}</h2>", unsafe_allow_html=True)
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    df = df.dropna(subset=[date_col])
 
-# ======================================================
-# SIDEBAR NAVIGATION
-# ======================================================
-st.sidebar.title("⛽ Fuel Station Suite")
+    df = df.rename(columns={date_col: "Date"})
 
-page = st.sidebar.radio(
-    "Navigate",
-    ["📅 Add Daily GID",
-     "📊 Daily Dashboard",
-     "📈 Monthly Intelligence"]
-)
+    numeric_cols = []
+    for col in df.columns:
+        if col != "Date":
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+            numeric_cols.append(col)
 
-# ======================================================
-# PAGE 1 — ADD DAILY GID
-# ======================================================
-if page == "📅 Add Daily GID":
+    df = df.fillna(0)
+    return df
 
-    header("Add Daily Sheet GID")
 
-    selected_date = st.date_input("Select Date", value=datetime.today())
-    gid = st.text_input("Enter GID")
+def forecast_next_7_days(df, target_col):
+    df = df.sort_values("Date")
+    df["DayNumber"] = (df["Date"] - df["Date"].min()).dt.days
 
-    if st.button("Save"):
-        formatted = selected_date.strftime("%d.%m.%y")
-        st.session_state.daily_gid_map[formatted] = gid
-        st.success(f"Saved for {formatted}")
+    X = df["DayNumber"].values
+    y = df[target_col].values
 
-    st.write("### Saved GIDs")
-    st.json(st.session_state.daily_gid_map)
+    if len(X) < 2:
+        return None
 
-# ======================================================
-# PAGE 2 — DAILY DASHBOARD
-# ======================================================
-elif page == "📊 Daily Dashboard":
+    slope, intercept = np.polyfit(X, y, 1)
 
-    header("Daily Performance Dashboard")
+    last_day = df["DayNumber"].max()
+    future_days = np.array([last_day + i for i in range(1, 8)])
+    future_values = slope * future_days + intercept
 
-    if not st.session_state.daily_gid_map:
-        st.warning("Add at least one GID first.")
-        st.stop()
-
-    selected_date = st.selectbox(
-        "Select Date",
-        list(st.session_state.daily_gid_map.keys())
-    )
-
-    df = load_daily_sheet(st.session_state.daily_gid_map[selected_date])
-
-    # Extract Consolidated Section
-    shift_df = pd.DataFrame({
-        "Shift": ["A", "B", "C"],
-        "QTY": [safe(df,7,1), safe(df,9,1), safe(df,11,1)],
-        "SALE": [safe(df,7,2), safe(df,9,2), safe(df,11,2)],
-        "CASH": [safe(df,7,3), safe(df,9,3), safe(df,11,3)],
-        "PAYTM": [safe(df,7,4), safe(df,9,4), safe(df,11,4)],
-        "CREDIT": [safe(df,7,6), safe(df,9,6), safe(df,11,6)],
-        "DIFF": [safe(df,7,8), safe(df,9,8), safe(df,11,8)],
-    })
-
-    total_sale = safe(df,13,2)
-    total_diff = safe(df,13,8)
-
-    k1,k2,k3 = st.columns(3)
-    k1.metric("Total Sale ₹", total_sale)
-    k2.metric("Total Difference ₹", total_diff)
-    k3.metric("Total Quantity", safe(df,13,1))
-
-    st.dataframe(shift_df, use_container_width=True)
-
-    fig = px.bar(shift_df, x="Shift", y="SALE", title="Shift Sales")
-    st.plotly_chart(fig, use_container_width=True)
-
-# ======================================================
-# PAGE 3 — MONTHLY INTELLIGENCE
-# ======================================================
-elif page == "📈 Monthly Intelligence":
-
-    header("Monthly Intelligence Engine")
-
-    selected_month = st.selectbox("Select Month", list(MONTHLY_SHEETS.keys()))
-    raw = load_monthly_sheet(MONTHLY_SHEETS[selected_month]).fillna("")
-
-    parsed = []
-
-    for i in range(len(raw)):
-        if str(raw.iloc[i,0]).strip().upper() == "TOTAL":
-            try:
-                parsed.append({
-                    "Day": len(parsed)+1,
-                    "QTY": float(raw.iloc[i,1]),
-                    "SALE": float(raw.iloc[i,2]),
-                    "CASH": float(raw.iloc[i,3]),
-                    "PAYTM": float(raw.iloc[i,4]),
-                    "ATM": float(raw.iloc[i,5]),
-                    "CREDIT": float(raw.iloc[i,6]),
-                    "COLLECTION": float(raw.iloc[i,7]),
-                    "DIFF": float(raw.iloc[i,8])
-                })
-            except:
-                pass
-
-    if not parsed:
-        st.error("Could not parse monthly structure.")
-        st.stop()
-
-    monthly_df = pd.DataFrame(parsed)
-
-    # ======================================================
-    # KPIs
-    # ======================================================
-    k1,k2,k3,k4 = st.columns(4)
-    k1.metric("Monthly Sale ₹", round(monthly_df["SALE"].sum(),2))
-    k2.metric("Avg Daily Sale ₹", round(monthly_df["SALE"].mean(),2))
-    k3.metric("Highest Day ₹", round(monthly_df["SALE"].max(),2))
-    k4.metric("Total Diff ₹", round(monthly_df["DIFF"].sum(),2))
-
-    st.divider()
-
-    # ======================================================
-    # 7-DAY FORECAST
-    # ======================================================
-    st.subheader("📊 7-Day Sales Forecast")
-
-    X = np.array(monthly_df.index).reshape(-1,1)
-    y = monthly_df["SALE"].values
-
-    model = LinearRegression()
-    model.fit(X,y)
-
-    future_days = np.array(range(len(monthly_df), len(monthly_df)+7)).reshape(-1,1)
-    forecast = model.predict(future_days)
+    future_dates = [df["Date"].max() + timedelta(days=i) for i in range(1, 8)]
 
     forecast_df = pd.DataFrame({
-        "Future Day": range(len(monthly_df)+1, len(monthly_df)+8),
-        "Forecasted Sale": forecast
+        "Date": future_dates,
+        "Forecast": future_values
     })
 
-    fig_forecast = go.Figure()
-    fig_forecast.add_trace(go.Scatter(
-        x=monthly_df["Day"],
-        y=monthly_df["SALE"],
-        mode='lines+markers',
-        name='Actual'
-    ))
-    fig_forecast.add_trace(go.Scatter(
-        x=forecast_df["Future Day"],
-        y=forecast_df["Forecasted Sale"],
-        mode='lines+markers',
-        name='Forecast'
-    ))
-    st.plotly_chart(fig_forecast, use_container_width=True)
+    return forecast_df
 
-    # ======================================================
-    # ALERT SYSTEM
-    # ======================================================
-    st.subheader("🚨 Short / Excess Alert System")
 
-    threshold = monthly_df["DIFF"].std() * 2
-    alerts = monthly_df[abs(monthly_df["DIFF"]) > threshold]
+def generate_alerts(df):
+    alerts = []
 
-    if not alerts.empty:
-        st.error("Abnormal Short/Excess Detected")
-        st.dataframe(alerts)
+    for col in df.columns:
+        if "short" in col.lower() or "excess" in col.lower():
+            mean = df[col].mean()
+            std = df[col].std()
+
+            abnormal = df[df[col] > mean + 2 * std]
+
+            if not abnormal.empty:
+                alerts.append(f"⚠️ Abnormal high {col} detected on {len(abnormal)} days.")
+
+    return alerts
+
+
+def estimate_profit(df):
+    sales_col = None
+    purchase_col = None
+
+    for col in df.columns:
+        if "sale" in col.lower():
+            sales_col = col
+        if "purchase" in col.lower() or "cost" in col.lower():
+            purchase_col = col
+
+    if sales_col and purchase_col:
+        df["Estimated Profit"] = df[sales_col] - df[purchase_col]
+        return df["Estimated Profit"].sum()
+
+    return None
+
+
+# ==============================
+# SIDEBAR NAVIGATION
+# ==============================
+
+st.sidebar.title("📊 Navigation")
+
+page = st.sidebar.radio(
+    "Select Page",
+    ["Daily GID Entry",
+     "Daily Dashboard",
+     "Monthly Intelligence Dashboard"]
+)
+
+# ==============================
+# PAGE 1 – DAILY GID ENTRY
+# ==============================
+
+if page == "Daily GID Entry":
+
+    st.title("📅 Daily GID Mapping")
+
+    selected_date = st.date_input("Select Date", datetime.today())
+    gid_input = st.text_input("Enter GID for this Date")
+
+    if st.button("Save GID"):
+        if gid_input:
+            st.session_state.daily_gid_map[str(selected_date)] = gid_input
+            st.success("GID saved successfully.")
+
+    st.subheader("Saved Mappings")
+    st.write(st.session_state.daily_gid_map)
+
+
+# ==============================
+# PAGE 2 – DAILY DASHBOARD
+# ==============================
+
+if page == "Daily Dashboard":
+
+    st.title("📈 Daily Operations Dashboard")
+
+    if not st.session_state.daily_gid_map:
+        st.warning("No GIDs saved yet.")
     else:
-        st.success("No abnormal short/excess detected")
-
-    # ======================================================
-    # PROFIT ESTIMATION MODULE
-    # ======================================================
-    st.subheader("💰 Profit Estimation")
-
-    profit_margin = st.slider("Estimated Profit per Unit (₹)", 0.0, 10.0, 2.0)
-
-    monthly_df["Estimated Profit"] = monthly_df["QTY"] * profit_margin
-
-    st.metric("Estimated Monthly Profit ₹",
-              round(monthly_df["Estimated Profit"].sum(),2))
-
-    fig_profit = px.bar(monthly_df,
-                        x="Day",
-                        y="Estimated Profit",
-                        title="Daily Estimated Profit")
-
-    st.plotly_chart(fig_profit, use_container_width=True)
-
-    # ======================================================
-    # Correlation
-    # ======================================================
-    st.subheader("📈 Correlation Matrix")
-
-    corr = monthly_df.corr()
-    fig_corr = go.Figure(
-        data=go.Heatmap(
-            z=corr.values,
-            x=corr.columns,
-            y=corr.columns
+        selected_date = st.selectbox(
+            "Select Date",
+            list(st.session_state.daily_gid_map.keys())
         )
+
+        sheet_id = list(MONTHLY_SHEETS.values())[0]  # using first sheet base
+        gid = st.session_state.daily_gid_map[selected_date]
+
+        try:
+            raw_df = load_google_sheet(sheet_id, gid)
+            df = parse_structure(raw_df)
+
+            if df is None:
+                st.error("Could not parse daily structure.")
+            else:
+                st.success("Data Loaded Successfully")
+
+                st.dataframe(df)
+
+                # KPIs
+                col1, col2, col3 = st.columns(3)
+
+                numeric_cols = df.select_dtypes(include=np.number).columns
+
+                if len(numeric_cols) >= 1:
+                    col1.metric("Total Volume", int(df[numeric_cols[0]].sum()))
+
+                if len(numeric_cols) >= 2:
+                    col2.metric("Average Value", round(df[numeric_cols[1]].mean(), 2))
+
+                profit = estimate_profit(df)
+                if profit:
+                    col3.metric("Estimated Profit", round(profit, 2))
+
+        except:
+            st.error("Error fetching daily sheet.")
+
+
+# ==============================
+# PAGE 3 – MONTHLY DASHBOARD
+# ==============================
+
+if page == "Monthly Intelligence Dashboard":
+
+    st.title("🚀 Monthly Intelligence Dashboard")
+
+    selected_month = st.selectbox(
+        "Select Month",
+        list(MONTHLY_SHEETS.keys())
     )
-    st.plotly_chart(fig_corr, use_container_width=True)
+
+    sheet_id = MONTHLY_SHEETS[selected_month]
+
+    try:
+        raw_df = load_google_sheet(sheet_id)
+        df = parse_structure(raw_df)
+
+        if df is None:
+            st.error("Could not parse monthly structure.")
+        else:
+
+            st.success("Monthly Data Loaded")
+
+            st.dataframe(df)
+
+            numeric_cols = df.select_dtypes(include=np.number).columns
+
+            # ================= KPIs =================
+
+            st.subheader("📊 Key Performance Indicators")
+
+            kpi_cols = st.columns(4)
+
+            if len(numeric_cols) >= 1:
+                kpi_cols[0].metric("Total Volume",
+                                   int(df[numeric_cols[0]].sum()))
+
+            if len(numeric_cols) >= 2:
+                kpi_cols[1].metric("Average Daily",
+                                   round(df[numeric_cols[1]].mean(), 2))
+
+            profit = estimate_profit(df)
+            if profit:
+                kpi_cols[2].metric("Estimated Monthly Profit",
+                                   round(profit, 2))
+
+            kpi_cols[3].metric("Total Days", len(df))
+
+            # ================= TRENDS =================
+
+            st.subheader("📈 Trend Analysis")
+
+            for col in numeric_cols[:3]:
+                fig = px.line(df, x="Date", y=col,
+                              title=f"{col} Trend")
+                st.plotly_chart(fig, use_container_width=True)
+
+            # ================= FORECAST =================
+
+            st.subheader("🔮 Forecast Next 7 Days")
+
+            if len(numeric_cols) >= 1:
+                forecast_df = forecast_next_7_days(df, numeric_cols[0])
+
+                if forecast_df is not None:
+                    fig_forecast = px.line(df, x="Date", y=numeric_cols[0])
+                    fig_forecast.add_scatter(
+                        x=forecast_df["Date"],
+                        y=forecast_df["Forecast"],
+                        mode="lines",
+                        name="Forecast"
+                    )
+                    st.plotly_chart(fig_forecast,
+                                    use_container_width=True)
+
+            # ================= ALERT SYSTEM =================
+
+            st.subheader("🚨 Alerts & Risk Monitoring")
+
+            alerts = generate_alerts(df)
+
+            if alerts:
+                for alert in alerts:
+                    st.error(alert)
+            else:
+                st.success("No abnormal short/excess detected.")
+
+    except:
+        st.error("Error fetching monthly sheet.")
