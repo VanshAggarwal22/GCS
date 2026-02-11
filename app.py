@@ -36,6 +36,9 @@ def extract_gid(link):
 # ==================================================
 # DAILY LOADER (AUTO SHEET ID + GID)
 # ==================================================
+# ==================================================
+# DAILY LOADER (READ FIXED RANGE AA7:AI14)
+# ==================================================
 def load_daily_sheet(link):
 
     sheet_id = extract_sheet_id(link)
@@ -45,6 +48,7 @@ def load_daily_sheet(link):
         st.error("Invalid Google Sheet link. Must contain sheet id and gid.")
         return None
 
+    # Google Sheets CSV export
     csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
 
     try:
@@ -53,36 +57,29 @@ def load_daily_sheet(link):
         st.error("Unable to fetch sheet. Make sure it is public.")
         return None
 
-    # ------------------------------
-    # FIND CONSOLIDATE DATA SECTION
-    # ------------------------------
-    start_row = None
-    for i in range(len(raw)):
-        if raw.iloc[i].astype(str).str.contains("CONSOLIDATE", case=False).any():
-            start_row = i
-            break
+    # --------------------------------------
+    # AA to AI → column index 26 to 34
+    # Row 7 to 14 → index 6 to 13
+    # --------------------------------------
 
-    if start_row is None:
-        st.error("Consolidate data section not found.")
-        return None
+    df = raw.iloc[6:14, 26:35].copy()
 
-    header_row = start_row + 1
-    data_start = header_row + 1
-
-    headers = raw.iloc[header_row].dropna().tolist()
-    df = raw.iloc[data_start:data_start + 6, :len(headers)].copy()
-    df.columns = headers
-    df = df.dropna(how="all")
+    # First row becomes header
+    df.columns = df.iloc[0]
+    df = df.iloc[1:].reset_index(drop=True)
 
     # Clean numeric columns
     for col in df.columns:
-        if col.upper() != "SHIFT":
-            df[col] = pd.to_numeric(
-                df[col].astype(str).str.replace(",", "", regex=False),
-                errors="coerce"
-            ).fillna(0)
+        df[col] = (
+            df[col]
+            .astype(str)
+            .str.replace(",", "", regex=False)
+            .replace("nan", "0")
+        )
+        df[col] = pd.to_numeric(df[col], errors="ignore")
 
     return df
+
 
 
 # --------------------------------------------------
