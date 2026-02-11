@@ -119,7 +119,7 @@ if page == "Daily Link Entry":
 
 
 # ==================================================
-# 2️⃣ DAILY DASHBOARD (FIXED - NO TOTAL DEPENDENCY)
+# 2️⃣ DAILY DASHBOARD (Enhanced KPIs + UI)
 # ==================================================
 if page == "Daily Dashboard":
 
@@ -139,34 +139,71 @@ if page == "Daily Dashboard":
 
         if df is not None:
 
-            if "SHIFT" not in df.columns:
-                st.error("SHIFT column not found.")
+            st.subheader("📄 Daily Raw Data")
+            st.dataframe(df, use_container_width=True)
+
+            numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+
+            if not numeric_cols:
+                st.warning("No numeric columns found for KPI calculation.")
             else:
-                # Exclude TOTAL row if present
-                shift_data = df[
-                    ~df["SHIFT"].astype(str).str.upper().str.contains("TOTAL", na=False)
+
+                totals = df[numeric_cols].sum()
+
+                st.divider()
+                st.subheader("📊 Key Performance Indicators")
+
+                cols = st.columns(min(5, len(numeric_cols)))
+
+                for i, col in enumerate(numeric_cols[:5]):
+                    cols[i].metric(
+                        label=col,
+                        value=f"{totals[col]:,.0f}"
+                    )
+
+                # -----------------------------------
+                # Payment Mix Pie (if applicable)
+                # -----------------------------------
+                payment_cols = [
+                    col for col in numeric_cols
+                    if any(word in col.upper() for word in ["CASH", "PAYTM", "CREDIT"])
                 ]
 
-                if shift_data.empty:
-                    st.error("No usable shift data found.")
-                else:
-                    totals = shift_data.sum(numeric_only=True)
+                if payment_cols:
+                    st.divider()
+                    st.subheader("💳 Payment Mix")
 
-                    def safe(col):
-                        return totals[col] if col in totals else 0
+                    payment_data = totals[payment_cols].reset_index()
+                    payment_data.columns = ["Mode", "Amount"]
 
-                    k1, k2, k3, k4, k5 = st.columns(5)
+                    fig_pie = px.pie(
+                        payment_data,
+                        names="Mode",
+                        values="Amount",
+                        hole=0.4
+                    )
 
-                    k1.metric("🔥 Gas Sold (KG)", f"{safe('QTY'):,.0f}")
-                    k2.metric("💰 Sale Amount (₹)", f"{safe('SALE AMOUNT'):,.0f}")
-                    k3.metric("💵 Cash (₹)", f"{safe('CASH'):,.0f}")
-                    k4.metric("📲 Paytm (₹)", f"{safe('PAYTM'):,.0f}")
-                    k5.metric("💳 Credit (₹)", f"{safe('CREDIT SALE'):,.0f}")
+                    st.plotly_chart(fig_pie, use_container_width=True)
+
+                # -----------------------------------
+                # Shift Comparison (if first column = SHIFT)
+                # -----------------------------------
+                if "SHIFT" in df.columns:
+
+                    shift_numeric = df.set_index("SHIFT")[numeric_cols]
 
                     st.divider()
+                    st.subheader("📊 Shift Comparison")
 
-                    st.subheader("📄 Shift Breakdown")
-                    st.dataframe(shift_data, use_container_width=True)
+                    fig_bar = px.bar(
+                        shift_numeric.reset_index(),
+                        x="SHIFT",
+                        y=numeric_cols,
+                        barmode="group"
+                    )
+
+                    st.plotly_chart(fig_bar, use_container_width=True)
+
 
 
 # ==================================================
