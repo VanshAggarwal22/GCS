@@ -128,12 +128,31 @@ if page == "Daily Dashboard":
         st.warning("No daily links added yet.")
     else:
 
-        selected_date = st.selectbox(
-            "Select Date",
-            list(st.session_state.daily_links.keys())
+        # ---------------------------------------------
+        # Calendar with only available dates enabled
+        # ---------------------------------------------
+        
+        available_dates = sorted(
+            [pd.to_datetime(d).date() for d in st.session_state.daily_links.keys()]
         )
+        
+        # Auto select latest available date
+        default_date = max(available_dates)
+        
+        selected_date = st.date_input(
+            "📅 Select Date",
+            value=default_date,
+            min_value=min(available_dates),
+            max_value=max(available_dates)
+        )
+        
+        # If selected date not in uploaded data, stop execution
+        if selected_date not in available_dates:
+            st.warning("⚠ No data available for selected date.")
+            st.stop()
+        
+        link = st.session_state.daily_links[str(selected_date)]
 
-        link = st.session_state.daily_links[selected_date]
         df = load_daily_sheet(link)
 
         if df is not None:
