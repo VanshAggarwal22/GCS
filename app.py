@@ -19,22 +19,30 @@ if "monthly_links" not in st.session_state:
     st.session_state.monthly_links = {}
 
 # --------------------------------------------------
-# HELPER: EXTRACT SHEET ID FROM LINK
+# EXTRACT SHEET ID
 # --------------------------------------------------
 def extract_sheet_id(link):
     match = re.search(r"/d/([a-zA-Z0-9-_]+)", link)
     return match.group(1) if match else None
 
+# --------------------------------------------------
+# EXTRACT GID
+# --------------------------------------------------
+def extract_gid(link):
+    match = re.search(r"gid=([0-9]+)", link)
+    return match.group(1) if match else None
+
 
 # ==================================================
-# DAILY LOADER (New GID Based)
+# DAILY LOADER (AUTO SHEET ID + GID)
 # ==================================================
-def load_daily_sheet(link, gid):
+def load_daily_sheet(link):
 
     sheet_id = extract_sheet_id(link)
+    gid = extract_gid(link)
 
-    if not sheet_id:
-        st.error("Invalid Google Sheet link.")
+    if not sheet_id or not gid:
+        st.error("Invalid Google Sheet link. Must contain sheet id and gid.")
         return None
 
     csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
@@ -45,7 +53,9 @@ def load_daily_sheet(link, gid):
         st.error("Unable to fetch sheet. Make sure it is public.")
         return None
 
-    # Find CONSOLIDATE DATA section
+    # ------------------------------
+    # FIND CONSOLIDATE DATA SECTION
+    # ------------------------------
     start_row = None
     for i in range(len(raw)):
         if raw.iloc[i].astype(str).str.contains("CONSOLIDATE", case=False).any():
@@ -64,7 +74,7 @@ def load_daily_sheet(link, gid):
     df.columns = headers
     df = df.dropna(how="all")
 
-    # Numeric cleaning
+    # Clean numeric columns
     for col in df.columns:
         if col.upper() != "SHIFT":
             df[col] = pd.to_numeric(
@@ -91,7 +101,7 @@ page = st.sidebar.radio(
 )
 
 # ==================================================
-# 1️⃣ DAILY LINK ENTRY
+# 1️⃣ DAILY LINK ENTRY (ONLY LINK NOW)
 # ==================================================
 if page == "Daily Link Entry":
 
@@ -99,17 +109,13 @@ if page == "Daily Link Entry":
 
     selected_date = st.date_input("Select Date")
     link = st.text_input("Paste Full Google Sheet Link")
-    gid = st.text_input("Enter GID (Sheet ID of that date tab)")
 
     if st.button("Save Daily Link"):
-        if link and gid:
-            st.session_state.daily_links[str(selected_date)] = {
-                "link": link,
-                "gid": gid
-            }
+        if link:
+            st.session_state.daily_links[str(selected_date)] = link
             st.success("Daily link saved successfully")
         else:
-            st.warning("Please enter both Link and GID.")
+            st.warning("Please enter a valid Google Sheet link.")
 
     st.subheader("Saved Daily Links")
     st.write(st.session_state.daily_links)
@@ -131,8 +137,8 @@ if page == "Daily Dashboard":
             list(st.session_state.daily_links.keys())
         )
 
-        entry = st.session_state.daily_links[selected_date]
-        df = load_daily_sheet(entry["link"], entry["gid"])
+        link = st.session_state.daily_links[selected_date]
+        df = load_daily_sheet(link)
 
         if df is not None:
 
@@ -164,7 +170,7 @@ if page == "Daily Dashboard":
 
 
 # ==================================================
-# 3️⃣ MONTHLY LINK MANAGER (ORIGINAL)
+# 3️⃣ MONTHLY LINK MANAGER (UNCHANGED ORIGINAL)
 # ==================================================
 if page == "Monthly Link Manager":
 
@@ -183,7 +189,7 @@ if page == "Monthly Link Manager":
 
 
 # ==================================================
-# 4️⃣ MONTHLY DASHBOARD (ORIGINAL EXACT LOGIC)
+# 4️⃣ MONTHLY DASHBOARD (ORIGINAL)
 # ==================================================
 if page == "Monthly Dashboard":
 
@@ -219,7 +225,6 @@ if page == "Monthly Dashboard":
             .str.replace("\n", " ")
         )
 
-        # Make unique columns
         def make_unique(cols):
             seen = {}
             new_cols = []
