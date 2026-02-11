@@ -25,10 +25,11 @@ def extract_sheet_id(link):
     match = re.search(r"/d/([a-zA-Z0-9-_]+)", link)
     return match.group(1) if match else None
 
+
 # --------------------------------------------------
-# LOAD & CLEAN FUNCTION (YOUR WORKING LOGIC)
+# DAILY SHEET LOADER (DYNAMIC CONSOLIDATE DETECTION)
 # --------------------------------------------------
-def load_sheet_from_link(link):
+def load_sheet_from_link(link, gid):
 
     sheet_id = extract_sheet_id(link)
 
@@ -36,61 +37,50 @@ def load_sheet_from_link(link):
         st.error("Invalid Google Sheet link.")
         return None
 
-    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
 
     try:
-        raw = pd.read_csv(csv_url, header=2)
+        raw = pd.read_csv(csv_url, header=None)
     except:
         st.error("Unable to fetch sheet. Make sure it is public (Anyone with link → Viewer).")
         return None
 
-    raw.columns = raw.iloc[0]
-    df = raw.iloc[1:].copy()
+    # --------------------------------------------------
+    # FIND "CONSOLIDATE DATA" SECTION DYNAMICALLY
+    # --------------------------------------------------
+    start_row = None
 
-    df.columns = (
-        df.columns.astype(str)
-        .str.strip()
-        .str.upper()
-        .str.replace("\n", " ")
-    )
+    for i in range(len(raw)):
+        if raw.iloc[i].astype(str).str.contains("CONSOLIDATE", case=False).any():
+            start_row = i
+            break
 
-    # Make unique
-    def make_unique(cols):
-        seen = {}
-        new_cols = []
-        for col in cols:
-            if col not in seen:
-                seen[col] = 0
-                new_cols.append(col)
-            else:
-                seen[col] += 1
-                new_cols.append(f"{col}_{seen[col]}")
-        return new_cols
+    if start_row is None:
+        st.error("Consolidate data section not found.")
+        return None
 
-    df.columns = make_unique(df.columns)
+    header_row = start_row + 1
+    data_start = header_row + 1
 
-    # Filter shift rows
-    if "SHIFT" in df.columns:
-        df["SHIFT"] = df["SHIFT"].astype(str).str.strip()
-        df = df[df["SHIFT"].isin(["A", "B", "C"])]
+    headers = raw.iloc[header_row].dropna().tolist()
 
-    # Fix date
-    if "DATE" in df.columns:
-        df["DATE"] = df["DATE"].ffill()
-        df["DATE"] = pd.to_datetime(df["DATE"], dayfirst=True, errors="coerce")
-        df = df.dropna(subset=["DATE"])
+    df = raw.iloc[data_start:data_start + 5, :len(headers)].copy()
+    df.columns = headers
+    df = df.dropna(how="all")
 
-    # Clean numeric
+    # Clean numeric columns
     for col in df.columns:
-        if col not in ["DATE", "SHIFT"]:
+        if col.upper() != "SHIFT":
             df[col] = (
-                df[col].astype(str)
+                df[col]
+                .astype(str)
                 .str.replace(",", "", regex=False)
                 .replace("nan", "0")
             )
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     return df
+
 
 # --------------------------------------------------
 # SIDEBAR NAVIGATION
@@ -115,12 +105,20 @@ if page == "Daily Link Entry":
     st.title("📅 Add Daily Sheet Link")
 
     selected_date = st.date_input("Select Date")
+
     link = st.text_input("Paste Full Google Sheet Link")
 
+    gid = st.text_input("Enter GID (Sheet ID of that date tab)")
+
     if st.button("Save Daily Link"):
-        if link:
-            st.session_state.daily_links[str(selected_date)] = link
+        if link and gid:
+            st.session_state.daily_links[str(selected_date)] = {
+                "link": link,
+                "gid": gid
+            }
             st.success("Daily link saved successfully")
+        else:
+            st.warning("Please enter both Link and GID.")
 
     st.subheader("Saved Daily Links")
     st.write(st.session_state.daily_links)
@@ -136,47 +134,47 @@ if page == "Daily Dashboard":
     if not st.session_state.daily_links:
         st.warning("No daily links added yet.")
     else:
+
         selected_date = st.selectbox(
             "Select Date",
             list(st.session_state.daily_links.keys())
         )
 
-        link = st.session_state.daily_links[selected_date]
+        entry = st.session_state.daily_links[selected_date]
 
-        df = load_sheet_from_link(link)
+        df = load_sheet_from_link(entry["link"], entry["gid"])
 
         if df is not None:
 
-            daily = df.groupby("DATE", as_index=False).sum(numeric_only=True)
+            if "SHIFT" not in df.columns:
+                st.error("SHIFT column not found.")
+            else:
+                total_row = df[df["SHIFT"].astype(str).str.upper() == "TOTAL"]
 
-            def safe(col):
-                return daily[col].sum() if col in daily.columns else 0
+                if total_row.empty:
+                    st.error("TOTAL row not found.")
+                else:
+                    total_row = total_row.iloc[0]
 
-            k1, k2, k3, k4, k5 = st.columns(5)
+                    def safe(col):
+                        return total_row[col] if col in total_row else 0
 
-            k1.metric("🔥 Gas Sold (KG)", f"{safe('TOTAL DSR QTY. KG'):,.0f}")
-            k2.metric("💳 Credit (₹)", f"{safe('CREDIT SALE (RS.)'):,.0f}")
-            k3.metric("💰 Paytm (₹)", f"{safe('PAYTM'):,.0f}")
-            k4.metric("🏦 Cash Deposit (₹)", f"{safe('CASH DEPOSIIT IN BANK'):,.0f}")
-            k5.metric("⚠️ Short Amount (₹)", f"{safe('SHORT AMOUNT'):,.0f}")
+                    k1, k2, k3, k4, k5 = st.columns(5)
 
-            st.divider()
+                    k1.metric("🔥 Gas Sold (KG)", f"{safe('QTY'):,.0f}")
+                    k2.metric("💰 Sale Amount (₹)", f"{safe('SALE AMOUNT'):,.0f}")
+                    k3.metric("💵 Cash (₹)", f"{safe('CASH'):,.0f}")
+                    k4.metric("📲 Paytm (₹)", f"{safe('PAYTM'):,.0f}")
+                    k5.metric("💳 Credit (₹)", f"{safe('CREDIT SALE'):,.0f}")
 
-            if "TOTAL DSR QTY. KG" in daily.columns:
-                fig = px.bar(
-                    daily,
-                    x="DATE",
-                    y="TOTAL DSR QTY. KG",
-                    title="Gas Sold"
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                    st.divider()
 
-            st.subheader("📄 Daily Data")
-            st.dataframe(daily, use_container_width=True)
+                    st.subheader("📄 Shift Breakdown")
+                    st.dataframe(df, use_container_width=True)
 
 
 # ==================================================
-# 3️⃣ MONTHLY LINK MANAGER
+# 3️⃣ MONTHLY LINK MANAGER  (UNCHANGED)
 # ==================================================
 if page == "Monthly Link Manager":
 
@@ -195,7 +193,7 @@ if page == "Monthly Link Manager":
 
 
 # ==================================================
-# 4️⃣ MONTHLY DASHBOARD
+# 4️⃣ MONTHLY DASHBOARD  (UNCHANGED)
 # ==================================================
 if page == "Monthly Dashboard":
 
@@ -212,45 +210,78 @@ if page == "Monthly Dashboard":
 
         link = st.session_state.monthly_links[selected_month]
 
-        df = load_sheet_from_link(link)
+        # ORIGINAL MONTHLY LOADER LOGIC KEPT SAME
+        sheet_id = extract_sheet_id(link)
+        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
 
-        if df is not None:
+        try:
+            raw = pd.read_csv(csv_url, header=2)
+        except:
+            st.error("Unable to fetch sheet.")
+            st.stop()
 
-            daily = df.groupby("DATE", as_index=False).sum(numeric_only=True)
+        raw.columns = raw.iloc[0]
+        df = raw.iloc[1:].copy()
 
-            # Date filter
-            date_range = st.sidebar.date_input(
-                "Select Date Range",
-                [daily["DATE"].min(), daily["DATE"].max()]
-            )
+        df.columns = (
+            df.columns.astype(str)
+            .str.strip()
+            .str.upper()
+            .str.replace("\n", " ")
+        )
 
-            daily = daily[
-                (daily["DATE"] >= pd.to_datetime(date_range[0])) &
-                (daily["DATE"] <= pd.to_datetime(date_range[1]))
-            ]
+        if "SHIFT" in df.columns:
+            df["SHIFT"] = df["SHIFT"].astype(str).str.strip()
+            df = df[df["SHIFT"].isin(["A", "B", "C"])]
 
-            def safe(col):
-                return daily[col].sum() if col in daily.columns else 0
+        if "DATE" in df.columns:
+            df["DATE"] = df["DATE"].ffill()
+            df["DATE"] = pd.to_datetime(df["DATE"], dayfirst=True, errors="coerce")
+            df = df.dropna(subset=["DATE"])
 
-            k1, k2, k3, k4, k5 = st.columns(5)
-
-            k1.metric("🔥 Total Gas (KG)", f"{safe('TOTAL DSR QTY. KG'):,.0f}")
-            k2.metric("💳 Credit (₹)", f"{safe('CREDIT SALE (RS.)'):,.0f}")
-            k3.metric("💰 Paytm (₹)", f"{safe('PAYTM'):,.0f}")
-            k4.metric("🏦 Cash Deposit (₹)", f"{safe('CASH DEPOSIIT IN BANK'):,.0f}")
-            k5.metric("⚠️ Short Amount (₹)", f"{safe('SHORT AMOUNT'):,.0f}")
-
-            st.divider()
-
-            if "TOTAL DSR QTY. KG" in daily.columns:
-                fig = px.line(
-                    daily,
-                    x="DATE",
-                    y="TOTAL DSR QTY. KG",
-                    markers=True,
-                    title="Monthly Gas Trend"
+        for col in df.columns:
+            if col not in ["DATE", "SHIFT"]:
+                df[col] = (
+                    df[col].astype(str)
+                    .str.replace(",", "", regex=False)
+                    .replace("nan", "0")
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-            st.subheader("📄 Monthly Data")
-            st.dataframe(daily, use_container_width=True)
+        daily = df.groupby("DATE", as_index=False).sum(numeric_only=True)
+
+        date_range = st.sidebar.date_input(
+            "Select Date Range",
+            [daily["DATE"].min(), daily["DATE"].max()]
+        )
+
+        daily = daily[
+            (daily["DATE"] >= pd.to_datetime(date_range[0])) &
+            (daily["DATE"] <= pd.to_datetime(date_range[1]))
+        ]
+
+        def safe(col):
+            return daily[col].sum() if col in daily.columns else 0
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+
+        k1.metric("🔥 Total Gas (KG)", f"{safe('TOTAL DSR QTY. KG'):,.0f}")
+        k2.metric("💳 Credit (₹)", f"{safe('CREDIT SALE (RS.)'):,.0f}")
+        k3.metric("💰 Paytm (₹)", f"{safe('PAYTM'):,.0f}")
+        k4.metric("🏦 Cash Deposit (₹)", f"{safe('CASH DEPOSIIT IN BANK'):,.0f}")
+        k5.metric("⚠️ Short Amount (₹)", f"{safe('SHORT AMOUNT'):,.0f}")
+
+        st.divider()
+
+        if "TOTAL DSR QTY. KG" in daily.columns:
+            fig = px.line(
+                daily,
+                x="DATE",
+                y="TOTAL DSR QTY. KG",
+                markers=True,
+                title="Monthly Gas Trend"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("📄 Monthly Data")
+        st.dataframe(daily, use_container_width=True)
