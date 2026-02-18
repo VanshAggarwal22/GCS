@@ -38,7 +38,7 @@ def connect_google():
 client = connect_google()
 
 # =====================================================
-# FETCH SPREADSHEETS (MONTH FILES)
+# FETCH SPREADSHEETS
 # =====================================================
 @st.cache_data(ttl=300)
 def get_spreadsheets():
@@ -57,56 +57,69 @@ selected_file = st.sidebar.selectbox("Select Spreadsheet (Month)", file_names)
 file_id = next(file["id"] for file in files if file["name"] == selected_file)
 
 # =====================================================
-# FETCH WORKSHEETS (DATE SHEETS)
+# FETCH WORKSHEETS
 # =====================================================
 spreadsheet = client.open_by_key(file_id)
 worksheets = spreadsheet.worksheets()
 sheet_names = [ws.title for ws in worksheets]
 
+if not sheet_names:
+    st.error("No sheets found inside this spreadsheet.")
+    st.stop()
+
 selected_sheet = st.sidebar.selectbox("Select Date Sheet", sheet_names)
 
 # =====================================================
-# LOAD DATA (NO HASHING ERROR)
+# LOAD DATA (SAFE)
 # =====================================================
 @st.cache_data(ttl=300)
 def load_data(spreadsheet_id, worksheet_name):
     spreadsheet = client.open_by_key(spreadsheet_id)
     worksheet = spreadsheet.worksheet(worksheet_name)
     data = worksheet.get_all_values()
+
+    if not data:
+        return pd.DataFrame()
+
     df = pd.DataFrame(data)
+
+    if len(df) < 2:
+        return pd.DataFrame()
+
     df.columns = df.iloc[0]
     df = df.iloc[1:].reset_index(drop=True)
+
     return df
 
 
 df = load_data(file_id, selected_sheet)
 
 if df.empty:
-    st.warning("No data in this sheet.")
+    st.warning("No usable data in this sheet.")
     st.stop()
 
 # =====================================================
-# CLEAN NUMERIC DATA
+# SAFE NUMERIC CLEANING (NO .str ERROR)
 # =====================================================
 for col in df.columns:
-    df[col] = (
-        df[col]
-        .astype(str)
-        .str.replace(",", "", regex=False)
+    df[col] = pd.to_numeric(
+        df[col].astype(str).str.replace(",", "", regex=False),
+        errors="ignore"
     )
-    df[col] = pd.to_numeric(df[col], errors="ignore")
 
-# Remove TOTAL row if exists
+# =====================================================
+# REMOVE TOTAL ROW (IF EXISTS)
+# =====================================================
 if "SHIFT" in df.columns:
     df_clean = df[~df["SHIFT"].astype(str).str.contains("TOTAL", case=False, na=False)]
 else:
     df_clean = df.copy()
 
-numeric_cols = df_clean.select_dtypes(include=np.number).columns.tolist()
-totals = df_clean[numeric_cols].sum()
+numeric_cols = df_clean.select_dtypes(include=[np.number]).columns.tolist()
+totals = df_clean[numeric_cols].sum() if numeric_cols else pd.Series()
 
 # =====================================================
-# COLUMN DETECTION
+# COLUMN AUTO DETECTION
 # =====================================================
 def find_col(keyword):
     for col in df.columns:
@@ -127,7 +140,6 @@ collection_col = find_col("TOTAL")
 # =====================================================
 st.title(f"🔥 CNG Dashboard - {selected_file}")
 st.subheader(f"📅 Date: {selected_sheet}")
-
 st.divider()
 
 k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
@@ -141,10 +153,10 @@ k6.metric("ATM (₹)", f"{totals.get(atm_col,0):,.0f}" if atm_col else "0")
 k7.metric("Total Collection (₹)", f"{totals.get(collection_col,0):,.0f}" if collection_col else "0")
 
 # =====================================================
-# PAYMENT MIX PIE
+# PAYMENT MIX
 # =====================================================
 payment_cols = [cash_col, paytm_col, credit_col, atm_col]
-payment_cols = [col for col in payment_cols if col in df_clean.columns]
+payment_cols = [col for col in payment_cols if col and col in df_clean.columns]
 
 if payment_cols:
     st.divider()
@@ -179,7 +191,7 @@ if "SHIFT" in df_clean.columns and numeric_cols:
     st.plotly_chart(fig_bar, use_container_width=True)
 
 # =====================================================
-# MONTHLY TREND
+# MONTHLY GAS TREND
 # =====================================================
 st.divider()
 st.subheader("📈 Monthly Gas Trend")
@@ -190,6 +202,9 @@ for ws in worksheets:
     try:
         temp_df = load_data(file_id, ws.title)
 
+        if temp_df.empty:
+            continue
+
         for col in temp_df.columns:
             temp_df[col] = pd.to_numeric(
                 temp_df[col].astype(str).str.replace(",", "", regex=False),
@@ -199,7 +214,8 @@ for ws in worksheets:
         if qty_col and qty_col in temp_df.columns:
             total_qty = temp_df[qty_col].sum()
             monthly_data.append({"Date": ws.title, "Gas Sold": total_qty})
-    except:
+
+    except Exception:
         continue
 
 if monthly_data:
