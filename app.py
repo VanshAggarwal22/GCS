@@ -122,50 +122,62 @@ st.sidebar.markdown("### 📅 Date Range Selection")
 date_range = st.sidebar.date_input("Select Date Range", [])
 
 # =====================================================
-# CONSOLIDATED DATA LOGIC
+# ENTERPRISE CONSOLIDATION LOGIC
 # =====================================================
-def get_dashboard_df(spreadsheet_id, worksheets, selected_date, date_range):
+def get_dashboard_df(date_range, selected_month, selected_date):
 
-    # ✅ If date range selected → consolidate all sheets
+    # ✅ If date range selected → scan ALL spreadsheets
     if len(date_range) == 2:
+
         start_date, end_date = date_range
         all_data = []
 
-        for sheet in worksheets:
-            try:
-                sheet_date = pd.to_datetime(sheet, errors="coerce")
+        for file_name, file_id in spreadsheets.items():
 
-                if pd.notna(sheet_date):
-                    if start_date <= sheet_date.date() <= end_date:
-                        temp_df = load_consolidated(spreadsheet_id, sheet)
-                        if temp_df is not None:
-                            all_data.append(temp_df)
+            try:
+                ws_list = list_worksheets(file_id)
+
+                for sheet in ws_list:
+                    try:
+                        sheet_date = pd.to_datetime(
+                            sheet.strip(),
+                            dayfirst=True,
+                            errors="coerce"
+                        )
+
+                        if pd.notna(sheet_date):
+                            if start_date <= sheet_date.date() <= end_date:
+
+                                temp_df = load_consolidated(file_id, sheet)
+
+                                if temp_df is not None:
+                                    all_data.append(temp_df)
+
+                    except:
+                        continue
+
             except:
                 continue
 
         if all_data:
             combined = pd.concat(all_data)
 
-            # 🔥 Group by SHIFT and sum numeric columns
-            combined_summary = (
+            consolidated = (
                 combined.groupby("SHIFT")
                 .sum(numeric_only=True)
                 .reset_index()
             )
 
-            return combined_summary
+            return consolidated
 
-    # ✅ Otherwise load selected single sheet
+        return None
+
+    # ✅ If no date range → normal single sheet behavior
     return load_consolidated(spreadsheet_id, selected_date)
 
 
 # Get main dataframe
-df = get_dashboard_df(
-    spreadsheet_id,
-    worksheets,
-    selected_date,
-    date_range
-)
+df = get_dashboard_df(date_range, selected_month, selected_date)
 
 if df is None or df.empty:
     st.error("No data available for selection.")
@@ -177,7 +189,7 @@ if df is None or df.empty:
 st.title("📊 Performance Dashboard")
 
 if len(date_range) == 2:
-    st.subheader(f"{selected_month} | Consolidated View")
+    st.subheader("Consolidated View (All Spreadsheets)")
 else:
     st.subheader(f"{selected_month} | {selected_date}")
 
