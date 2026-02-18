@@ -1,218 +1,125 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import plotly.express as px
 import gspread
 from google.oauth2.service_account import Credentials
-import re
 
-# =====================================================
-# PAGE CONFIG
-# =====================================================
-st.set_page_config(
-    page_title="CNG Intelligence System",
-    page_icon="🔥",
-    layout="wide"
-)
+st.set_page_config(page_title="Google Sheets Dashboard", layout="wide")
 
-# =====================================================
+# -----------------------------
 # GOOGLE CONNECTION
-# =====================================================
+# -----------------------------
 @st.cache_resource
 def connect_google():
+
     scope = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
 
+    service_account_info = dict(st.secrets["gcp_service_account"])
+
+    # Convert \n to real newlines
+    service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
+
     credentials = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"],
+        service_account_info,
         scopes=scope
     )
 
-    return gspread.authorize(credentials)
+    client = gspread.authorize(credentials)
+    return client
+
 
 client = connect_google()
 
-# =====================================================
-# AUTO DETECT SPREADSHEETS (MONTH FILES)
-# =====================================================
+# -----------------------------
+# FETCH ALL SPREADSHEETS
+# -----------------------------
 @st.cache_data(ttl=300)
-def list_month_spreadsheets():
-    files = client.list_spreadsheet_files()
-    return {file["name"]: file["id"] for file in files}
+def get_spreadsheets():
+    return client.list_spreadsheet_files()
 
-month_files = list_month_spreadsheets()
 
-if not month_files:
-    st.error("No spreadsheets shared with service account.")
+files = get_spreadsheets()
+
+if not files:
+    st.error("No spreadsheets found. Share sheet with service account email.")
     st.stop()
 
-# =====================================================
-# SIDEBAR - MONTH SELECTION
-# =====================================================
-st.sidebar.title("📊 Navigation")
+file_names = [file["name"] for file in files]
 
-selected_month = st.sidebar.selectbox(
-    "Select Month Spreadsheet",
-    list(month_files.keys())
-)
+selected_file = st.sidebar.selectbox("Select Spreadsheet (Month)", file_names)
 
-spreadsheet = client.open_by_key(month_files[selected_month])
+file_id = next(file["id"] for file in files if file["name"] == selected_file)
 
-# =====================================================
-# AUTO DETECT DATE TABS
-# =====================================================
+spreadsheet = client.open_by_key(file_id)
+
+# -----------------------------
+# FETCH WORKSHEETS (DATES)
+# -----------------------------
 worksheets = spreadsheet.worksheets()
-date_tabs = [ws.title for ws in worksheets]
+worksheet_names = [ws.title for ws in worksheets]
 
-selected_date_tab = st.sidebar.selectbox(
-    "Select Date",
-    sorted(date_tabs)
-)
+selected_sheet = st.sidebar.selectbox("Select Date Sheet", worksheet_names)
 
-worksheet = spreadsheet.worksheet(selected_date_tab)
+worksheet = spreadsheet.worksheet(selected_sheet)
 
-# =====================================================
+# -----------------------------
 # LOAD DATA
-# =====================================================
-data = worksheet.get_all_values()
-df = pd.DataFrame(data)
+# -----------------------------
+@st.cache_data(ttl=300)
+def load_data(ws):
+    data = ws.get_all_records()
+    df = pd.DataFrame(data)
+    return df
 
-df.columns = df.iloc[0]
-df = df.iloc[1:].reset_index(drop=True)
 
-# Clean numeric columns
+df = load_data(worksheet)
+
+if df.empty:
+    st.warning("No data found in this sheet.")
+    st.stop()
+
+st.title("📊 Google Sheets Live Dashboard")
+
+st.subheader(f"Spreadsheet: {selected_file}")
+st.subheader(f"Sheet: {selected_sheet}")
+
+# -----------------------------
+# CLEAN NUMERIC DATA
+# -----------------------------
 for col in df.columns:
-    df[col] = (
-        df[col]
-        .astype(str)
-        .str.replace(",", "", regex=False)
-    )
     df[col] = pd.to_numeric(df[col], errors="ignore")
 
-# =====================================================
-# REMOVE TOTAL ROW IF EXISTS
-# =====================================================
-if "SHIFT" in df.columns:
-    df_clean = df[~df["SHIFT"].astype(str).str.contains("TOTAL", case=False, na=False)]
-else:
-    df_clean = df.copy()
+numeric_cols = df.select_dtypes(include=["int64", "float64"]).columns
 
-numeric_cols = df_clean.select_dtypes(include=np.number).columns.tolist()
-totals = df_clean[numeric_cols].sum()
+# -----------------------------
+# METRICS SECTION
+# -----------------------------
+st.markdown("## 🔢 Key Metrics")
 
-# =====================================================
-# KPI DETECTION
-# =====================================================
-def find_col(keyword):
-    for col in df.columns:
-        if keyword in col.upper():
-            return col
-    return None
+cols = st.columns(min(len(numeric_cols), 4))
 
-qty_col = find_col("QTY")
-sale_col = find_col("SALE")
-cash_col = find_col("CASH")
-paytm_col = find_col("PAYTM")
-credit_col = find_col("CREDIT")
-atm_col = find_col("ATM")
-collection_col = find_col("TOTAL COLLECTION")
-
-# =====================================================
-# DASHBOARD UI
-# =====================================================
-st.title(f"🔥 CNG Dashboard - {selected_month}")
-st.subheader(f"📅 Date: {selected_date_tab}")
-
-st.divider()
-
-k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
-
-k1.metric("Gas Sold (KG)", f"{totals.get(qty_col,0):,.0f}" if qty_col else "0")
-k2.metric("Sale Amount (₹)", f"{totals.get(sale_col,0):,.0f}" if sale_col else "0")
-k3.metric("Cash (₹)", f"{totals.get(cash_col,0):,.0f}" if cash_col else "0")
-k4.metric("Paytm (₹)", f"{totals.get(paytm_col,0):,.0f}" if paytm_col else "0")
-k5.metric("Credit (₹)", f"{totals.get(credit_col,0):,.0f}" if credit_col else "0")
-k6.metric("ATM (₹)", f"{totals.get(atm_col,0):,.0f}" if atm_col else "0")
-k7.metric("Total Collection (₹)", f"{totals.get(collection_col,0):,.0f}" if collection_col else "0")
-
-# =====================================================
-# PAYMENT MIX PIE
-# =====================================================
-payment_cols = [cash_col, paytm_col, credit_col, atm_col]
-payment_cols = [col for col in payment_cols if col in df_clean.columns]
-
-if payment_cols:
-    st.divider()
-    st.subheader("💳 Payment Mix")
-
-    payment_data = df_clean[payment_cols].sum().reset_index()
-    payment_data.columns = ["Mode", "Amount"]
-
-    fig_pie = px.pie(
-        payment_data,
-        names="Mode",
-        values="Amount",
-        hole=0.4
+for i, col in enumerate(numeric_cols[:4]):
+    cols[i].metric(
+        label=col,
+        value=round(df[col].sum(), 2)
     )
 
-    st.plotly_chart(fig_pie, use_container_width=True)
-
-# =====================================================
-# SHIFT COMPARISON
-# =====================================================
-if "SHIFT" in df_clean.columns and numeric_cols:
-    st.divider()
-    st.subheader("📊 Shift Comparison")
-
-    fig_bar = px.bar(
-        df_clean,
-        x="SHIFT",
-        y=numeric_cols,
-        barmode="group"
-    )
-
-    st.plotly_chart(fig_bar, use_container_width=True)
-
-# =====================================================
-# MONTHLY AGGREGATION
-# =====================================================
-st.divider()
-st.subheader("📈 Monthly Aggregation")
-
-monthly_data = []
-
-for ws in worksheets:
-    try:
-        data = ws.get_all_values()
-        temp_df = pd.DataFrame(data)
-        temp_df.columns = temp_df.iloc[0]
-        temp_df = temp_df.iloc[1:]
-        for col in temp_df.columns:
-            temp_df[col] = pd.to_numeric(
-                temp_df[col].astype(str).str.replace(",", "", regex=False),
-                errors="coerce"
-            )
-        numeric = temp_df.select_dtypes(include=np.number).sum()
-        numeric["DATE"] = ws.title
-        monthly_data.append(numeric)
-    except:
-        continue
-
-if monthly_data:
-    monthly_df = pd.DataFrame(monthly_data)
-
-    if qty_col and qty_col in monthly_df.columns:
-        fig_line = px.line(
-            monthly_df,
-            x="DATE",
-            y=qty_col,
-            markers=True,
-            title="Monthly Gas Trend"
-        )
-        st.plotly_chart(fig_line, use_container_width=True)
-
-st.divider()
-st.subheader("📄 Raw Data")
+# -----------------------------
+# DATA TABLE
+# -----------------------------
+st.markdown("## 📄 Data Table")
 st.dataframe(df, use_container_width=True)
+
+# -----------------------------
+# CHARTS
+# -----------------------------
+st.markdown("## 📈 Visualizations")
+
+if len(numeric_cols) > 0:
+    selected_chart_col = st.selectbox("Select Column for Chart", numeric_cols)
+
+    st.line_chart(df[selected_chart_col])
+else:
+    st.info("No numeric columns available for charts.")
