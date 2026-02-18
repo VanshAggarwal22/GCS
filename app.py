@@ -3,36 +3,12 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 import plotly.express as px
+from datetime import datetime
 
 # =====================================================
 # PAGE CONFIG
 # =====================================================
 st.set_page_config(page_title="Performance Dashboard", layout="wide")
-
-# =====================================================
-# CUSTOM KPI STYLING
-# =====================================================
-st.markdown("""
-<style>
-.kpi-card {
-    background: linear-gradient(135deg, #1f2937, #111827);
-    padding: 20px;
-    border-radius: 18px;
-    box-shadow: 0px 4px 20px rgba(0,0,0,0.15);
-    text-align: center;
-}
-.kpi-title {
-    font-size: 14px;
-    color: #9ca3af;
-    margin-bottom: 8px;
-}
-.kpi-value {
-    font-size: 26px;
-    font-weight: bold;
-    color: white;
-}
-</style>
-""", unsafe_allow_html=True)
 
 # =====================================================
 # GOOGLE AUTH
@@ -53,7 +29,7 @@ credentials = Credentials.from_service_account_info(
 client = gspread.authorize(credentials)
 
 # =====================================================
-# LOAD FUNCTIONS
+# LOAD SPREADSHEETS
 # =====================================================
 @st.cache_data
 def list_spreadsheets():
@@ -65,8 +41,11 @@ def list_worksheets(spreadsheet_id):
     spreadsheet = client.open_by_key(spreadsheet_id)
     return [ws.title for ws in spreadsheet.worksheets()]
 
+# =====================================================
+# LOAD CONSOLIDATED DATA
+# =====================================================
 @st.cache_data
-def load_consolidated(spreadsheet_id, worksheet_name):
+def load_sheet(spreadsheet_id, worksheet_name):
     spreadsheet = client.open_by_key(spreadsheet_id)
     worksheet = spreadsheet.worksheet(worksheet_name)
 
@@ -78,9 +57,8 @@ def load_consolidated(spreadsheet_id, worksheet_name):
     df = pd.DataFrame(data)
 
     headers = df.iloc[1]
-    df = df.iloc[2:]
+    df = df[2:]
     df.columns = headers
-    df.columns = df.columns.str.strip()
     df = df.dropna(how="all")
 
     for col in df.columns[1:]:
@@ -88,225 +66,159 @@ def load_consolidated(spreadsheet_id, worksheet_name):
             df[col]
             .astype(str)
             .str.replace(",", "", regex=False)
-            .str.strip()
         )
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     return df.reset_index(drop=True)
 
 # =====================================================
-# SIDEBAR
+# KPI CARD
 # =====================================================
-st.sidebar.title("📁 Select Data")
-
-spreadsheets = list_spreadsheets()
-
-if not spreadsheets:
-    st.error("No spreadsheets found.")
-    st.stop()
-
-selected_month = st.sidebar.selectbox(
-    "Select Spreadsheet (Month)",
-    list(spreadsheets.keys())
-)
-
-spreadsheet_id = spreadsheets[selected_month]
-worksheets = list_worksheets(spreadsheet_id)
-
-selected_date = st.sidebar.selectbox(
-    "Select Date Sheet",
-    worksheets
-)
-
-# ---------------------------
-# DATE RANGE FILTER
-# ---------------------------
-st.sidebar.markdown("### 📅 Date Range Selection")
-date_range = st.sidebar.date_input("Select Date Range", [])
-
-df = load_consolidated(spreadsheet_id, selected_date)
-
-if df is None or df.empty:
-    st.error("Could not load data.")
-    st.stop()
-
-# =====================================================
-# HEADER
-# =====================================================
-st.title("📊 Performance Dashboard")
-st.subheader(f"{selected_month} | {selected_date}")
-
-# =====================================================
-# SAFE COLUMN ACCESS
-# =====================================================
-if "TOTAL" not in df["SHIFT"].values:
-    st.error("TOTAL row not found.")
-    st.stop()
-
-total_row = df[df["SHIFT"] == "TOTAL"].iloc[0]
-
-def safe_get(column):
-    return total_row[column] if column in df.columns else 0
-
 def kpi_card(title, value):
     st.markdown(f"""
-        <div class="kpi-card">
-            <div class="kpi-title">{title}</div>
-            <div class="kpi-value">{value}</div>
+        <div style="
+            background-color:#111827;
+            padding:20px;
+            border-radius:12px;
+            box-shadow:0px 4px 12px rgba(0,0,0,0.2);
+        ">
+            <div style="color:#9CA3AF;font-size:14px;">{title}</div>
+            <div style="color:white;font-size:26px;font-weight:600;">{value}</div>
         </div>
     """, unsafe_allow_html=True)
 
 # =====================================================
-# PROFESSIONAL KPI SECTION
+# SIDEBAR
 # =====================================================
-st.subheader("🔢 Overall Performance")
+st.sidebar.title("📅 Select Data")
 
-row1 = st.columns(4)
-row2 = st.columns(4)
+spreadsheets = list_spreadsheets()
+selected_month = st.sidebar.selectbox("Select Month", list(spreadsheets.keys()))
+spreadsheet_id = spreadsheets[selected_month]
 
-with row1[0]:
+worksheets = list_worksheets(spreadsheet_id)
+
+# Convert worksheet titles to date safely
+date_map = {}
+for ws in worksheets:
+    try:
+        date_obj = datetime.strptime(ws, "%d-%m")
+        date_map[date_obj] = ws
+    except:
+        continue
+
+sorted_dates = sorted(date_map.keys())
+
+# Date Range Picker
+selected_range = st.sidebar.date_input(
+    "Select Date Range",
+    [sorted_dates[0], sorted_dates[-1]]
+)
+
+# =====================================================
+# CONSOLIDATE RANGE
+# =====================================================
+combined_df = pd.DataFrame()
+
+if len(selected_range) == 2:
+    start_date, end_date = selected_range
+
+    for date_obj in sorted_dates:
+        if start_date <= date_obj.date() <= end_date:
+            ws_name = date_map[date_obj]
+            df = load_sheet(spreadsheet_id, ws_name)
+
+            if df is not None:
+                total_row = df[df["SHIFT"] == "TOTAL"]
+                if not total_row.empty:
+                    combined_df = pd.concat([combined_df, total_row])
+
+# If no range selected fallback
+if combined_df.empty:
+    st.warning("No data found for selected range.")
+    st.stop()
+
+# Group by SHIFT (TOTAL only)
+final_df = combined_df.groupby("SHIFT").sum(numeric_only=True).reset_index()
+total_row = final_df.iloc[0]
+
+# =====================================================
+# DASHBOARD HEADER
+# =====================================================
+st.title("📊 Performance Dashboard")
+st.subheader(f"{selected_month}")
+
+# =====================================================
+# KPI SECTION
+# =====================================================
+col1, col2, col3, col4 = st.columns(4)
+col5, col6, col7, col8 = st.columns(4)
+
+def safe_get(column):
+    return float(total_row[column]) if column in final_df.columns else 0
+
+with col1:
     kpi_card("Total Quantity", f"{safe_get('QTY'):,.2f}")
-
-with row1[1]:
+with col2:
     kpi_card("Total Sale", f"₹ {safe_get('SALE AMOUNT'):,.2f}")
-
-with row1[2]:
+with col3:
     kpi_card("Total Cash", f"₹ {safe_get('CASH'):,.2f}")
-
-with row1[3]:
+with col4:
     kpi_card("Total Paytm", f"₹ {safe_get('PAYTM'):,.2f}")
 
-with row2[0]:
+with col5:
     kpi_card("Total ATM", f"₹ {safe_get('ATM'):,.2f}")
-
-with row2[1]:
+with col6:
     kpi_card("Total Credit", f"₹ {safe_get('CREDIT SALE'):,.2f}")
-
-with row2[2]:
+with col7:
     kpi_card("Total Collection", f"₹ {safe_get('TOTAL COLLECTION'):,.2f}")
-
-with row2[3]:
+with col8:
     kpi_card("Difference", f"₹ {safe_get('DIFF'):,.2f}")
 
 st.divider()
 
 # =====================================================
-# RANGE CONSOLIDATION
+# GRAPH – PAYMENT DISTRIBUTION
 # =====================================================
-if len(date_range) == 2:
-    start_date, end_date = date_range
+payment_df = pd.DataFrame({
+    "Mode": ["Cash", "Paytm", "ATM", "Credit"],
+    "Amount": [
+        safe_get("CASH"),
+        safe_get("PAYTM"),
+        safe_get("ATM"),
+        safe_get("CREDIT SALE")
+    ]
+})
 
-    all_data = []
-
-    for sheet in worksheets:
-        try:
-            sheet_date = pd.to_datetime(sheet, errors="coerce")
-            if pd.notna(sheet_date):
-                if start_date <= sheet_date.date() <= end_date:
-                    temp_df = load_consolidated(spreadsheet_id, sheet)
-                    if temp_df is not None:
-                        total = temp_df[temp_df["SHIFT"] == "TOTAL"]
-                        if not total.empty:
-                            total["DATE"] = sheet_date
-                            all_data.append(total)
-        except:
-            continue
-
-    if all_data:
-        range_summary = pd.concat(all_data)
-        agg = range_summary.sum(numeric_only=True)
-
-        st.subheader("📊 Consolidated Range Analysis")
-
-        cols = st.columns(4)
-        cols[0].metric("Range Sale", f"₹ {agg.get('SALE AMOUNT',0):,.2f}")
-        cols[1].metric("Range Collection", f"₹ {agg.get('TOTAL COLLECTION',0):,.2f}")
-        cols[2].metric("Range Credit", f"₹ {agg.get('CREDIT SALE',0):,.2f}")
-        cols[3].metric("Range Difference", f"₹ {agg.get('DIFF',0):,.2f}")
-
-        st.divider()
-
-# =====================================================
-# SHIFT TABLE
-# =====================================================
-st.subheader("📋 Shift Performance")
-st.dataframe(df, use_container_width=True)
-
-# =====================================================
-# SALE BY SHIFT
-# =====================================================
-st.subheader("📊 Sale Amount by Shift")
-shift_df = df[df["SHIFT"] != "TOTAL"]
-
-if "SALE AMOUNT" in df.columns:
-    fig1 = px.bar(
-        shift_df,
-        x="SHIFT",
-        y="SALE AMOUNT",
-        text_auto=True,
-        color="SHIFT"
-    )
-    st.plotly_chart(fig1, use_container_width=True)
-
-# =====================================================
-# PAYMENT DISTRIBUTION
-# =====================================================
-st.subheader("💳 Payment Distribution (Total)")
-
-payment_modes = ["CASH", "PAYTM", "ATM", "CREDIT SALE"]
-
-payment_data = {
-    "Mode": [],
-    "Amount": []
-}
-
-for mode in payment_modes:
-    if mode in df.columns:
-        payment_data["Mode"].append(mode.title())
-        payment_data["Amount"].append(safe_get(mode))
-
-payment_df = pd.DataFrame(payment_data)
-
-if not payment_df.empty:
-    fig2 = px.pie(
-        payment_df,
-        names="Mode",
-        values="Amount",
-        hole=0.5
-    )
-    st.plotly_chart(fig2, use_container_width=True)
+fig1 = px.pie(payment_df, names="Mode", values="Amount", hole=0.5)
+st.plotly_chart(fig1, use_container_width=True)
 
 # =====================================================
 # MONTH WISE ANALYSIS
 # =====================================================
-st.subheader("📈 Month Wise Analysis")
+st.subheader("📈 Month-wise Daily Trend")
 
-monthly_totals = []
+trend_data = []
 
-for sheet in worksheets:
-    try:
-        temp_df = load_consolidated(spreadsheet_id, sheet)
-        if temp_df is not None:
-            total = temp_df[temp_df["SHIFT"] == "TOTAL"]
-            if not total.empty:
-                total["DATE"] = pd.to_datetime(sheet, errors="coerce")
-                monthly_totals.append(total)
-    except:
-        continue
+for date_obj in sorted_dates:
+    ws_name = date_map[date_obj]
+    df = load_sheet(spreadsheet_id, ws_name)
 
-if monthly_totals:
-    month_df = pd.concat(monthly_totals)
-    month_df = month_df.dropna(subset=["DATE"])
+    if df is not None:
+        total_row = df[df["SHIFT"] == "TOTAL"]
+        if not total_row.empty:
+            trend_data.append({
+                "Date": date_obj.strftime("%d-%m"),
+                "Sale": float(total_row["SALE AMOUNT"])
+            })
 
-    month_df["MONTH"] = month_df["DATE"].dt.to_period("M")
+trend_df = pd.DataFrame(trend_data)
 
-    month_summary = month_df.groupby("MONTH").sum(numeric_only=True).reset_index()
-
-    if "SALE AMOUNT" in month_summary.columns:
-        fig_month = px.line(
-            month_summary,
-            x="MONTH",
-            y="SALE AMOUNT",
-            markers=True
-        )
-        st.plotly_chart(fig_month, use_container_width=True)
+if not trend_df.empty:
+    fig_month = px.line(
+        trend_df,
+        x="Date",
+        y="Sale",
+        markers=True
+    )
+    st.plotly_chart(fig_month, use_container_width=True)
