@@ -1,159 +1,143 @@
 import streamlit as st
 import pandas as pd
-import gspread
-from google.oauth2.service_account import Credentials
 import plotly.express as px
+from openpyxl import load_workbook
 
-# =====================================================
-# PAGE CONFIG
-# =====================================================
-st.set_page_config(page_title="Performance Dashboard", layout="wide")
+st.set_page_config(page_title="Daily Sales Dashboard", layout="wide")
 
-# =====================================================
-# GOOGLE AUTH
-# =====================================================
-scope = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
+st.title("📊 Daily Sales Dashboard")
 
-service_account_info = dict(st.secrets["gcp_service_account"])
-service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
+# ---------------------------
+# Upload Excel File
+# ---------------------------
+uploaded_file = st.file_uploader("Upload Monthly Excel File", type=["xlsx"])
 
-credentials = Credentials.from_service_account_info(
-    service_account_info,
-    scopes=scope
-)
+if uploaded_file:
 
-client = gspread.authorize(credentials)
+    wb = load_workbook(uploaded_file, data_only=True)
+    sheets = wb.sheetnames
 
-# =====================================================
-# LOAD SPREADSHEETS
-# =====================================================
-@st.cache_data
-def list_spreadsheets():
-    files = client.list_spreadsheet_files()
-    return {file["name"]: file["id"] for file in files}
+    selected_sheet = st.selectbox("Select Date Sheet", sheets)
 
-@st.cache_data
-def list_worksheets(spreadsheet_id):
-    spreadsheet = client.open_by_key(spreadsheet_id)
-    return [ws.title for ws in spreadsheet.worksheets()]
+    ws = wb[selected_sheet]
 
-# =====================================================
-# LOAD CONSOLIDATED DATA
-# =====================================================
-@st.cache_data
-def load_consolidated(spreadsheet_id, worksheet_name):
-    spreadsheet = client.open_by_key(spreadsheet_id)
-    worksheet = spreadsheet.worksheet(worksheet_name)
-
-    data = worksheet.get("AA6:AJ14")
-
-    if not data:
-        return None
+    # Extract CONSOLIDATE DATA section
+    data = ws.iter_rows(min_row=7, max_row=14, min_col=27, max_col=35, values_only=True)
 
     df = pd.DataFrame(data)
 
-    # Row 1 inside range = header
-    headers = df.iloc[1]
-    df = df[2:]
-    df.columns = headers
-    df = df.dropna(how="all")
+    # Assign correct headers
+    df.columns = [
+        "SHIFT",
+        "QTY",
+        "SALE_AMOUNT",
+        "CASH",
+        "PAYTM",
+        "ATM",
+        "CREDIT_SALE",
+        "TOTAL_COLLECTION",
+        "DIFF"
+    ]
 
-    # Clean numbers
-    for col in df.columns[1:]:
+    # Remove header row (SHIFT, QTY...)
+    df = df.iloc[1:]
+
+    # Clean numeric columns
+    numeric_cols = df.columns[1:]
+
+    for col in numeric_cols:
         df[col] = (
             df[col]
             .astype(str)
-            .str.replace(",", "")
+            .str.replace(",", "", regex=False)
+            .str.strip()
         )
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    return df.reset_index(drop=True)
+    # Split shift rows and total row
+    shift_df = df.iloc[:3]
+    total_row = df.iloc[3]
 
-# =====================================================
-# SIDEBAR
-# =====================================================
-st.sidebar.title("Select Data")
+    # ---------------------------
+    # TOTAL METRICS
+    # ---------------------------
+    total_qty = total_row["QTY"]
+    total_atm = total_row["ATM"]
+    total_collection = total_row["TOTAL_COLLECTION"]
+    total_diff = total_row["DIFF"]
 
-spreadsheets = list_spreadsheets()
-selected_month = st.sidebar.selectbox("Select Spreadsheet (Month)", list(spreadsheets.keys()))
+    # ---------------------------
+    # METRICS UI
+    # ---------------------------
+    st.subheader("🔢 Overall Totals")
 
-spreadsheet_id = spreadsheets[selected_month]
-worksheets = list_worksheets(spreadsheet_id)
-selected_date = st.sidebar.selectbox("Select Date Sheet", worksheets)
+    col1, col2, col3, col4 = st.columns(4)
 
-df = load_consolidated(spreadsheet_id, selected_date)
+    col1.metric("Total Quantity", f"{total_qty:,.2f}")
+    col2.metric("Total ATM", f"{total_atm:,.2f}")
+    col3.metric("Total Collection", f"{total_collection:,.2f}")
+    col4.metric("Difference", f"{total_diff:,.2f}")
 
-if df is None or df.empty:
-    st.error("Could not load data.")
-    st.stop()
+    st.divider()
 
-# =====================================================
-# DASHBOARD HEADER
-# =====================================================
-st.title("📊 Performance Dashboard")
-st.subheader(f"{selected_month} | {selected_date}")
+    # ---------------------------
+    # SHIFT TABLE
+    # ---------------------------
+    st.subheader("📋 Shift Wise Data")
 
-# =====================================================
-# METRICS SECTION
-# =====================================================
-total_row = df[df["SHIFT"] == "TOTAL"].iloc[0]
+    st.dataframe(
+        shift_df.style.format({
+            "QTY": "{:,.2f}",
+            "SALE_AMOUNT": "{:,.2f}",
+            "CASH": "{:,.2f}",
+            "PAYTM": "{:,.2f}",
+            "ATM": "{:,.2f}",
+            "CREDIT_SALE": "{:,.2f}",
+            "TOTAL_COLLECTION": "{:,.2f}",
+            "DIFF": "{:,.2f}",
+        }),
+        use_container_width=True
+    )
 
-m1, m2, m3, m4 = st.columns(4)
+    # ---------------------------
+    # CHART 1 - Sale Amount by Shift
+    # ---------------------------
+    st.subheader("📊 Sale Amount by Shift")
 
-m1.metric("Total Sale", f"₹ {total_row['SALE AMOUNT']:,.2f}")
-m2.metric("Total Cash", f"₹ {total_row['CASH']:,.2f}")
-m3.metric("Total Paytm", f"₹ {total_row['PAYTM']:,.2f}")
-m4.metric("Total Credit", f"₹ {total_row['CREDIT SALE']:,.2f}")
+    fig1 = px.bar(
+        shift_df,
+        x="SHIFT",
+        y="SALE_AMOUNT",
+        text="SALE_AMOUNT",
+        color="SHIFT"
+    )
 
-st.divider()
+    fig1.update_layout(height=400)
+    st.plotly_chart(fig1, use_container_width=True)
 
-# =====================================================
-# SHIFT COMPARISON TABLE
-# =====================================================
-st.subheader("Shift Performance")
-st.dataframe(df, use_container_width=True)
+    # ---------------------------
+    # CHART 2 - Payment Distribution
+    # ---------------------------
+    st.subheader("💳 Payment Mode Distribution")
 
-# =====================================================
-# GRAPH 1 – SALE AMOUNT BY SHIFT
-# =====================================================
-st.subheader("Sale Amount by Shift")
+    payment_df = shift_df[["SHIFT", "CASH", "PAYTM", "CREDIT_SALE"]]
 
-shift_df = df[df["SHIFT"] != "TOTAL"]
+    payment_melted = payment_df.melt(
+        id_vars="SHIFT",
+        var_name="MODE",
+        value_name="AMOUNT"
+    )
 
-fig1 = px.bar(
-    shift_df,
-    x="SHIFT",
-    y="SALE AMOUNT",
-    text_auto=True,
-    color="SHIFT"
-)
+    fig2 = px.bar(
+        payment_melted,
+        x="SHIFT",
+        y="AMOUNT",
+        color="MODE",
+        barmode="group"
+    )
 
-st.plotly_chart(fig1, use_container_width=True)
+    fig2.update_layout(height=400)
+    st.plotly_chart(fig2, use_container_width=True)
 
-# =====================================================
-# GRAPH 2 – PAYMENT DISTRIBUTION (TOTAL)
-# =====================================================
-st.subheader("Payment Distribution (Total)")
-
-payment_data = {
-    "Mode": ["Cash", "Paytm", "Credit"],
-    "Amount": [
-        total_row["CASH"],
-        total_row["PAYTM"],
-        total_row["CREDIT SALE"]
-    ]
-}
-
-payment_df = pd.DataFrame(payment_data)
-
-fig2 = px.pie(
-    payment_df,
-    names="Mode",
-    values="Amount",
-    hole=0.5
-)
-
-st.plotly_chart(fig2, use_container_width=True)
+else:
+    st.info("Please upload your monthly Excel file to begin.")
