@@ -9,7 +9,7 @@ from google.oauth2.service_account import Credentials
 st.set_page_config(page_title="Performance Dashboard", layout="wide")
 
 # =====================================================
-# GOOGLE AUTH USING STREAMLIT SECRETS
+# GOOGLE AUTH (FROM STREAMLIT SECRETS)
 # =====================================================
 scope = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -27,7 +27,7 @@ credentials = Credentials.from_service_account_info(
 client = gspread.authorize(credentials)
 
 # =====================================================
-# LOAD SPREADSHEET LIST (MONTHS)
+# LIST SPREADSHEETS (MONTHS)
 # =====================================================
 @st.cache_data
 def list_spreadsheets():
@@ -35,7 +35,7 @@ def list_spreadsheets():
     return {file["name"]: file["id"] for file in files}
 
 # =====================================================
-# LOAD WORKSHEET NAMES (DATES)
+# LIST WORKSHEETS (DATES)
 # =====================================================
 @st.cache_data
 def list_worksheets(spreadsheet_id):
@@ -43,18 +43,72 @@ def list_worksheets(spreadsheet_id):
     return [ws.title for ws in spreadsheet.worksheets()]
 
 # =====================================================
-# LOAD DATA FROM SHEET
+# LOAD CONSOLIDATE DATA BLOCK
 # =====================================================
 @st.cache_data
-def load_data(spreadsheet_id, worksheet_name):
+def load_consolidated_metrics(spreadsheet_id, worksheet_name):
     spreadsheet = client.open_by_key(spreadsheet_id)
     worksheet = spreadsheet.worksheet(worksheet_name)
-    data = worksheet.get_all_records()
-    df = pd.DataFrame(data)
-    return df
+
+    raw = worksheet.get_all_values()
+
+    if not raw:
+        return {}
+
+    df = pd.DataFrame(raw)
+
+    consolidate_row = None
+    consolidate_col = None
+
+    # Locate "CONSOLIDATE DATA"
+    for r in range(len(df)):
+        for c in range(len(df.columns)):
+            if str(df.iloc[r, c]).strip().upper() == "CONSOLIDATE DATA":
+                consolidate_row = r
+                consolidate_col = c
+                break
+        if consolidate_row is not None:
+            break
+
+    if consolidate_row is None:
+        return {}
+
+    def safe_float(value):
+        try:
+            return float(str(value).replace(",", ""))
+        except:
+            return 0.0
+
+    metrics = {}
+
+    try:
+        # SHIFT A
+        metrics["SHIFT_A_QTY"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+1])
+        metrics["SHIFT_A_SALE"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+2])
+        metrics["SHIFT_A_CASH"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+3])
+        metrics["SHIFT_A_PAYTM"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+4])
+        metrics["SHIFT_A_ATM"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+5])
+        metrics["SHIFT_A_CREDIT"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+6])
+        metrics["SHIFT_A_TOTAL"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+7])
+        metrics["SHIFT_A_DIFF"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+8])
+
+        # SHIFT B
+        metrics["SHIFT_B_QTY"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+1])
+        metrics["SHIFT_B_SALE"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+2])
+        metrics["SHIFT_B_CASH"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+3])
+        metrics["SHIFT_B_PAYTM"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+4])
+        metrics["SHIFT_B_ATM"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+5])
+        metrics["SHIFT_B_CREDIT"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+6])
+        metrics["SHIFT_B_TOTAL"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+7])
+        metrics["SHIFT_B_DIFF"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+8])
+
+    except:
+        return {}
+
+    return metrics
 
 # =====================================================
-# SIDEBAR SELECTION
+# SIDEBAR
 # =====================================================
 st.sidebar.title("Select Data")
 
@@ -79,53 +133,40 @@ selected_date = st.sidebar.selectbox(
 )
 
 # =====================================================
-# LOAD DATA
+# LOAD METRICS
 # =====================================================
-df = load_data(spreadsheet_id, selected_date)
+metrics = load_consolidated_metrics(spreadsheet_id, selected_date)
 
-if df.empty:
-    st.warning("No data available in selected sheet.")
+if not metrics:
+    st.error("Could not extract CONSOLIDATE DATA section.")
     st.stop()
 
 # =====================================================
-# SAFE NUMERIC CLEANING (NO .str ACCESSOR USED)
-# =====================================================
-for col in df.columns:
-    df[col] = df[col].astype(str).replace(",", "", regex=True)
-    df[col] = pd.to_numeric(df[col], errors="ignore")
-
-# =====================================================
-# DASHBOARD TITLE
+# DASHBOARD UI
 # =====================================================
 st.title("📊 Performance Dashboard")
 st.subheader(f"{selected_month} | {selected_date}")
 
-# =====================================================
-# AUTO METRIC CALCULATION
-# =====================================================
+col1, col2 = st.columns(2)
 
-numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+with col1:
+    st.subheader("SHIFT A")
+    st.metric("Quantity", metrics["SHIFT_A_QTY"])
+    st.metric("Sale Amount", f"₹ {metrics['SHIFT_A_SALE']:,.2f}")
+    st.metric("Cash", f"₹ {metrics['SHIFT_A_CASH']:,.2f}")
+    st.metric("Paytm", f"₹ {metrics['SHIFT_A_PAYTM']:,.2f}")
+    st.metric("ATM", f"₹ {metrics['SHIFT_A_ATM']:,.2f}")
+    st.metric("Credit Sale", f"₹ {metrics['SHIFT_A_CREDIT']:,.2f}")
+    st.metric("Total Collection", f"₹ {metrics['SHIFT_A_TOTAL']:,.2f}")
+    st.metric("Difference", f"₹ {metrics['SHIFT_A_DIFF']:,.2f}")
 
-if not numeric_cols:
-    st.warning("No numeric columns found to calculate metrics.")
-else:
-    total_metrics = {}
-
-    for col in numeric_cols:
-        total_metrics[col] = df[col].sum()
-
-    # Display metrics in columns
-    cols = st.columns(min(4, len(total_metrics)))
-
-    for i, (metric_name, value) in enumerate(total_metrics.items()):
-        cols[i % len(cols)].metric(
-            label=metric_name,
-            value=f"{value:,.2f}"
-        )
-
-# =====================================================
-# DATA TABLE
-# =====================================================
-st.markdown("---")
-st.subheader("Raw Data")
-st.dataframe(df, use_container_width=True)
+with col2:
+    st.subheader("SHIFT B")
+    st.metric("Quantity", metrics["SHIFT_B_QTY"])
+    st.metric("Sale Amount", f"₹ {metrics['SHIFT_B_SALE']:,.2f}")
+    st.metric("Cash", f"₹ {metrics['SHIFT_B_CASH']:,.2f}")
+    st.metric("Paytm", f"₹ {metrics['SHIFT_B_PAYTM']:,.2f}")
+    st.metric("ATM", f"₹ {metrics['SHIFT_B_ATM']:,.2f}")
+    st.metric("Credit Sale", f"₹ {metrics['SHIFT_B_CREDIT']:,.2f}")
+    st.metric("Total Collection", f"₹ {metrics['SHIFT_B_TOTAL']:,.2f}")
+    st.metric("Difference", f"₹ {metrics['SHIFT_B_DIFF']:,.2f}")
