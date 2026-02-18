@@ -9,7 +9,7 @@ from google.oauth2.service_account import Credentials
 st.set_page_config(page_title="Performance Dashboard", layout="wide")
 
 # =====================================================
-# GOOGLE AUTH (FROM STREAMLIT SECRETS)
+# GOOGLE AUTH
 # =====================================================
 scope = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -27,7 +27,7 @@ credentials = Credentials.from_service_account_info(
 client = gspread.authorize(credentials)
 
 # =====================================================
-# LIST SPREADSHEETS (MONTHS)
+# LIST SPREADSHEETS
 # =====================================================
 @st.cache_data
 def list_spreadsheets():
@@ -35,7 +35,7 @@ def list_spreadsheets():
     return {file["name"]: file["id"] for file in files}
 
 # =====================================================
-# LIST WORKSHEETS (DATES)
+# LIST WORKSHEETS
 # =====================================================
 @st.cache_data
 def list_worksheets(spreadsheet_id):
@@ -43,7 +43,7 @@ def list_worksheets(spreadsheet_id):
     return [ws.title for ws in spreadsheet.worksheets()]
 
 # =====================================================
-# LOAD CONSOLIDATE DATA BLOCK
+# LOAD CONSOLIDATE METRICS
 # =====================================================
 @st.cache_data
 def load_consolidated_metrics(spreadsheet_id, worksheet_name):
@@ -53,17 +53,18 @@ def load_consolidated_metrics(spreadsheet_id, worksheet_name):
     raw = worksheet.get_all_values()
 
     if not raw:
-        return {}
+        return {}, None
 
     df = pd.DataFrame(raw)
 
     consolidate_row = None
     consolidate_col = None
 
-    # Locate "CONSOLIDATE DATA"
+    # Flexible search
     for r in range(len(df)):
         for c in range(len(df.columns)):
-            if str(df.iloc[r, c]).strip().upper() == "CONSOLIDATE DATA":
+            cell_value = str(df.iloc[r, c]).strip().upper()
+            if "CONSOLIDATE" in cell_value:
                 consolidate_row = r
                 consolidate_col = c
                 break
@@ -71,41 +72,44 @@ def load_consolidated_metrics(spreadsheet_id, worksheet_name):
             break
 
     if consolidate_row is None:
-        return {}
+        return {}, df.head(25)
 
     def safe_float(value):
         try:
-            return float(str(value).replace(",", ""))
+            return float(str(value).replace(",", "").strip())
         except:
             return 0.0
 
-    metrics = {}
-
     try:
-        # SHIFT A
-        metrics["SHIFT_A_QTY"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+1])
-        metrics["SHIFT_A_SALE"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+2])
-        metrics["SHIFT_A_CASH"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+3])
-        metrics["SHIFT_A_PAYTM"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+4])
-        metrics["SHIFT_A_ATM"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+5])
-        metrics["SHIFT_A_CREDIT"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+6])
-        metrics["SHIFT_A_TOTAL"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+7])
-        metrics["SHIFT_A_DIFF"] = safe_float(df.iloc[consolidate_row+2, consolidate_col+8])
+        shift_a_row = consolidate_row + 2
+        shift_b_row = consolidate_row + 4
 
-        # SHIFT B
-        metrics["SHIFT_B_QTY"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+1])
-        metrics["SHIFT_B_SALE"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+2])
-        metrics["SHIFT_B_CASH"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+3])
-        metrics["SHIFT_B_PAYTM"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+4])
-        metrics["SHIFT_B_ATM"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+5])
-        metrics["SHIFT_B_CREDIT"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+6])
-        metrics["SHIFT_B_TOTAL"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+7])
-        metrics["SHIFT_B_DIFF"] = safe_float(df.iloc[consolidate_row+4, consolidate_col+8])
+        metrics = {
+            # SHIFT A
+            "SHIFT_A_QTY": safe_float(df.iloc[shift_a_row, consolidate_col+1]),
+            "SHIFT_A_SALE": safe_float(df.iloc[shift_a_row, consolidate_col+2]),
+            "SHIFT_A_CASH": safe_float(df.iloc[shift_a_row, consolidate_col+3]),
+            "SHIFT_A_PAYTM": safe_float(df.iloc[shift_a_row, consolidate_col+4]),
+            "SHIFT_A_ATM": safe_float(df.iloc[shift_a_row, consolidate_col+5]),
+            "SHIFT_A_CREDIT": safe_float(df.iloc[shift_a_row, consolidate_col+6]),
+            "SHIFT_A_TOTAL": safe_float(df.iloc[shift_a_row, consolidate_col+7]),
+            "SHIFT_A_DIFF": safe_float(df.iloc[shift_a_row, consolidate_col+8]),
+
+            # SHIFT B
+            "SHIFT_B_QTY": safe_float(df.iloc[shift_b_row, consolidate_col+1]),
+            "SHIFT_B_SALE": safe_float(df.iloc[shift_b_row, consolidate_col+2]),
+            "SHIFT_B_CASH": safe_float(df.iloc[shift_b_row, consolidate_col+3]),
+            "SHIFT_B_PAYTM": safe_float(df.iloc[shift_b_row, consolidate_col+4]),
+            "SHIFT_B_ATM": safe_float(df.iloc[shift_b_row, consolidate_col+5]),
+            "SHIFT_B_CREDIT": safe_float(df.iloc[shift_b_row, consolidate_col+6]),
+            "SHIFT_B_TOTAL": safe_float(df.iloc[shift_b_row, consolidate_col+7]),
+            "SHIFT_B_DIFF": safe_float(df.iloc[shift_b_row, consolidate_col+8]),
+        }
 
     except:
-        return {}
+        return {}, df.head(25)
 
-    return metrics
+    return metrics, None
 
 # =====================================================
 # SIDEBAR
@@ -133,16 +137,21 @@ selected_date = st.sidebar.selectbox(
 )
 
 # =====================================================
-# LOAD METRICS
+# LOAD DATA
 # =====================================================
-metrics = load_consolidated_metrics(spreadsheet_id, selected_date)
+metrics, debug_df = load_consolidated_metrics(spreadsheet_id, selected_date)
 
 if not metrics:
     st.error("Could not extract CONSOLIDATE DATA section.")
+
+    if debug_df is not None:
+        st.subheader("Sheet Preview (Debug)")
+        st.dataframe(debug_df)
+
     st.stop()
 
 # =====================================================
-# DASHBOARD UI
+# DASHBOARD
 # =====================================================
 st.title("📊 Performance Dashboard")
 st.subheader(f"{selected_month} | {selected_date}")
