@@ -140,40 +140,46 @@ st.title("📊 Performance Dashboard")
 st.subheader(f"{selected_month} | {selected_date}")
 
 # =====================================================
-# METRICS SECTION (ALL TOTALS)
+# PROFESSIONAL KPI CARDS
 # =====================================================
-if "TOTAL" not in df["SHIFT"].values:
-    st.error("TOTAL row not found.")
-    st.stop()
-
-total_row = df[df["SHIFT"] == "TOTAL"].iloc[0]
-
 st.subheader("🔢 Overall Performance")
 
 row1 = st.columns(4)
 row2 = st.columns(4)
 
-# Row 1
-row1[0].metric("Total Quantity", f"{total_row['QTY']:,.2f}")
-row1[1].metric("Total Sale", f"₹ {total_row['SALE AMOUNT']:,.2f}")
-row1[2].metric("Total Cash", f"₹ {total_row['CASH']:,.2f}")
-row1[3].metric("Total Paytm", f"₹ {total_row['PAYTM']:,.2f}")
+def kpi_card(title, value):
+    st.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-title">{title}</div>
+            <div class="kpi-value">{value}</div>
+        </div>
+    """, unsafe_allow_html=True)
 
-# Row 2
-row2[0].metric("Total ATM", f"₹ {total_row['ATM']:,.2f}")
-row2[1].metric("Total Credit", f"₹ {total_row['CREDIT SALE']:,.2f}")
-row2[2].metric("Total Collection", f"₹ {total_row['TOTAL COLLECTION']:,.2f}")
+with row1[0]:
+    kpi_card("Total Quantity", f"{total_row['QTY']:,.2f}")
 
-diff_value = total_row["DIFF"]
+with row1[1]:
+    kpi_card("Total Sale", f"₹ {total_row['SALE AMOUNT']:,.2f}")
 
-row2[3].metric(
-    "Difference",
-    f"₹ {diff_value:,.2f}",
-    delta=f"{diff_value:,.2f}"
-)
+with row1[2]:
+    kpi_card("Total Cash", f"₹ {total_row['CASH']:,.2f}")
+
+with row1[3]:
+    kpi_card("Total Paytm", f"₹ {total_row['PAYTM']:,.2f}")
+
+with row2[0]:
+    kpi_card("Total ATM", f"₹ {total_row['ATM']:,.2f}")
+
+with row2[1]:
+    kpi_card("Total Credit", f"₹ {total_row['CREDIT SALE']:,.2f}")
+
+with row2[2]:
+    kpi_card("Total Collection", f"₹ {total_row['TOTAL COLLECTION']:,.2f}")
+
+with row2[3]:
+    kpi_card("Difference", f"₹ {total_row['DIFF']:,.2f}")
 
 st.divider()
-
 # =====================================================
 # SHIFT TABLE
 # =====================================================
