@@ -5,21 +5,19 @@ import plotly.express as px
 import gspread
 from google.oauth2.service_account import Credentials
 import re
-import json
-import os
 
-# ==========================================================
+# =====================================================
 # PAGE CONFIG
-# ==========================================================
+# =====================================================
 st.set_page_config(
-    page_title="CNG Intelligence Dashboard",
+    page_title="CNG Intelligence System",
     page_icon="🔥",
     layout="wide"
 )
 
-# ==========================================================
+# =====================================================
 # GOOGLE CONNECTION
-# ==========================================================
+# =====================================================
 @st.cache_resource
 def connect_google():
     scope = [
@@ -34,199 +32,187 @@ def connect_google():
 
     return gspread.authorize(credentials)
 
+client = connect_google()
 
-# ==========================================================
-# UTILITIES
-# ==========================================================
-def extract_sheet_id(link):
-    match = re.search(r"/d/([a-zA-Z0-9-_]+)", link)
-    return match.group(1) if match else None
-
-
+# =====================================================
+# AUTO DETECT SPREADSHEETS (MONTH FILES)
+# =====================================================
 @st.cache_data(ttl=300)
-def fetch_sheet(link, worksheet_name=None):
-    client = connect_google()
-    sheet_id = extract_sheet_id(link)
+def list_month_spreadsheets():
+    files = client.list_spreadsheet_files()
+    return {file["name"]: file["id"] for file in files}
 
-    spreadsheet = client.open_by_key(sheet_id)
+month_files = list_month_spreadsheets()
 
-    if worksheet_name:
-        worksheet = spreadsheet.worksheet(worksheet_name)
-    else:
-        worksheet = spreadsheet.sheet1
+if not month_files:
+    st.error("No spreadsheets shared with service account.")
+    st.stop()
 
-    data = worksheet.get_all_values()
-    df = pd.DataFrame(data)
-
-    df.columns = df.iloc[0]
-    df = df.iloc[1:].reset_index(drop=True)
-
-    return df
-
-
-def clean_numeric(df):
-    for col in df.columns:
-        df[col] = (
-            df[col]
-            .astype(str)
-            .str.replace(",", "", regex=False)
-        )
-        df[col] = pd.to_numeric(df[col], errors="ignore")
-    return df
-
-
-# ==========================================================
-# LINK STORAGE
-# ==========================================================
-DATA_FILE = "links.json"
-
-def load_links():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    return {"daily": {}, "monthly": {}}
-
-def save_links(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
-
-data_store = load_links()
-
-
-# ==========================================================
-# SIDEBAR
-# ==========================================================
+# =====================================================
+# SIDEBAR - MONTH SELECTION
+# =====================================================
 st.sidebar.title("📊 Navigation")
 
-page = st.sidebar.radio(
-    "Select Dashboard",
-    ["Daily Dashboard", "Add Daily Link", "Monthly Dashboard", "Add Monthly Link"]
+selected_month = st.sidebar.selectbox(
+    "Select Month Spreadsheet",
+    list(month_files.keys())
 )
 
+spreadsheet = client.open_by_key(month_files[selected_month])
 
-# ==========================================================
-# DAILY LINK ENTRY
-# ==========================================================
-if page == "Add Daily Link":
+# =====================================================
+# AUTO DETECT DATE TABS
+# =====================================================
+worksheets = spreadsheet.worksheets()
+date_tabs = [ws.title for ws in worksheets]
 
-    st.title("📅 Add Daily Sheet Link")
+selected_date_tab = st.sidebar.selectbox(
+    "Select Date",
+    sorted(date_tabs)
+)
 
-    date = st.date_input("Select Date")
-    link = st.text_input("Paste Google Sheet Link")
+worksheet = spreadsheet.worksheet(selected_date_tab)
 
-    if st.button("Save"):
-        data_store["daily"][str(date)] = link
-        save_links(data_store)
-        st.success("Saved Successfully")
+# =====================================================
+# LOAD DATA
+# =====================================================
+data = worksheet.get_all_values()
+df = pd.DataFrame(data)
 
+df.columns = df.iloc[0]
+df = df.iloc[1:].reset_index(drop=True)
 
-# ==========================================================
-# DAILY DASHBOARD
-# ==========================================================
-if page == "Daily Dashboard":
+# Clean numeric columns
+for col in df.columns:
+    df[col] = (
+        df[col]
+        .astype(str)
+        .str.replace(",", "", regex=False)
+    )
+    df[col] = pd.to_numeric(df[col], errors="ignore")
 
-    st.title("🔥 Daily CNG Operations")
+# =====================================================
+# REMOVE TOTAL ROW IF EXISTS
+# =====================================================
+if "SHIFT" in df.columns:
+    df_clean = df[~df["SHIFT"].astype(str).str.contains("TOTAL", case=False, na=False)]
+else:
+    df_clean = df.copy()
 
-    if not data_store["daily"]:
-        st.warning("No daily links added.")
-        st.stop()
+numeric_cols = df_clean.select_dtypes(include=np.number).columns.tolist()
+totals = df_clean[numeric_cols].sum()
 
-    dates = sorted(data_store["daily"].keys())
-    selected = st.selectbox("Select Date", dates)
+# =====================================================
+# KPI DETECTION
+# =====================================================
+def find_col(keyword):
+    for col in df.columns:
+        if keyword in col.upper():
+            return col
+    return None
 
-    link = data_store["daily"][selected]
+qty_col = find_col("QTY")
+sale_col = find_col("SALE")
+cash_col = find_col("CASH")
+paytm_col = find_col("PAYTM")
+credit_col = find_col("CREDIT")
+atm_col = find_col("ATM")
+collection_col = find_col("TOTAL COLLECTION")
 
-    try:
-        df = fetch_sheet(link)
-        df = clean_numeric(df)
-    except Exception as e:
-        st.error(f"Error loading sheet: {e}")
-        st.stop()
+# =====================================================
+# DASHBOARD UI
+# =====================================================
+st.title(f"🔥 CNG Dashboard - {selected_month}")
+st.subheader(f"📅 Date: {selected_date_tab}")
 
-    numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+st.divider()
 
-    if numeric_cols:
+k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
 
-        totals = df[numeric_cols].sum()
+k1.metric("Gas Sold (KG)", f"{totals.get(qty_col,0):,.0f}" if qty_col else "0")
+k2.metric("Sale Amount (₹)", f"{totals.get(sale_col,0):,.0f}" if sale_col else "0")
+k3.metric("Cash (₹)", f"{totals.get(cash_col,0):,.0f}" if cash_col else "0")
+k4.metric("Paytm (₹)", f"{totals.get(paytm_col,0):,.0f}" if paytm_col else "0")
+k5.metric("Credit (₹)", f"{totals.get(credit_col,0):,.0f}" if credit_col else "0")
+k6.metric("ATM (₹)", f"{totals.get(atm_col,0):,.0f}" if atm_col else "0")
+k7.metric("Total Collection (₹)", f"{totals.get(collection_col,0):,.0f}" if collection_col else "0")
 
-        cols = st.columns(4)
+# =====================================================
+# PAYMENT MIX PIE
+# =====================================================
+payment_cols = [cash_col, paytm_col, credit_col, atm_col]
+payment_cols = [col for col in payment_cols if col in df_clean.columns]
 
-        for i, col in enumerate(numeric_cols[:4]):
-            cols[i].metric(col, f"{totals[col]:,.0f}")
+if payment_cols:
+    st.divider()
+    st.subheader("💳 Payment Mix")
 
-        st.divider()
+    payment_data = df_clean[payment_cols].sum().reset_index()
+    payment_data.columns = ["Mode", "Amount"]
 
-        fig = px.bar(
-            df,
-            x=df.columns[0],
-            y=numeric_cols,
-            barmode="group"
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.dataframe(df, use_container_width=True)
-
-
-# ==========================================================
-# MONTHLY LINK ENTRY
-# ==========================================================
-if page == "Add Monthly Link":
-
-    st.title("📆 Add Monthly Sheet")
-
-    month = st.text_input("Month Name")
-    link = st.text_input("Paste Sheet Link")
-
-    if st.button("Save Monthly"):
-        data_store["monthly"][month] = link
-        save_links(data_store)
-        st.success("Saved Successfully")
-
-
-# ==========================================================
-# MONTHLY DASHBOARD
-# ==========================================================
-if page == "Monthly Dashboard":
-
-    st.title("🚀 Monthly Intelligence")
-
-    if not data_store["monthly"]:
-        st.warning("No monthly links added.")
-        st.stop()
-
-    selected = st.selectbox(
-        "Select Month",
-        list(data_store["monthly"].keys())
+    fig_pie = px.pie(
+        payment_data,
+        names="Mode",
+        values="Amount",
+        hole=0.4
     )
 
-    link = data_store["monthly"][selected]
+    st.plotly_chart(fig_pie, use_container_width=True)
 
+# =====================================================
+# SHIFT COMPARISON
+# =====================================================
+if "SHIFT" in df_clean.columns and numeric_cols:
+    st.divider()
+    st.subheader("📊 Shift Comparison")
+
+    fig_bar = px.bar(
+        df_clean,
+        x="SHIFT",
+        y=numeric_cols,
+        barmode="group"
+    )
+
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+# =====================================================
+# MONTHLY AGGREGATION
+# =====================================================
+st.divider()
+st.subheader("📈 Monthly Aggregation")
+
+monthly_data = []
+
+for ws in worksheets:
     try:
-        df = fetch_sheet(link)
-        df = clean_numeric(df)
-    except Exception as e:
-        st.error(f"Error loading sheet: {e}")
-        st.stop()
+        data = ws.get_all_values()
+        temp_df = pd.DataFrame(data)
+        temp_df.columns = temp_df.iloc[0]
+        temp_df = temp_df.iloc[1:]
+        for col in temp_df.columns:
+            temp_df[col] = pd.to_numeric(
+                temp_df[col].astype(str).str.replace(",", "", regex=False),
+                errors="coerce"
+            )
+        numeric = temp_df.select_dtypes(include=np.number).sum()
+        numeric["DATE"] = ws.title
+        monthly_data.append(numeric)
+    except:
+        continue
 
-    numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+if monthly_data:
+    monthly_df = pd.DataFrame(monthly_data)
 
-    if "DATE" in df.columns:
-        df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
-        df = df.dropna(subset=["DATE"])
-
-        daily = df.groupby("DATE", as_index=False).sum(numeric_only=True)
-
-        st.metric("Total Volume", f"{daily[numeric_cols].sum().sum():,.0f}")
-
-        fig = px.line(
-            daily,
+    if qty_col and qty_col in monthly_df.columns:
+        fig_line = px.line(
+            monthly_df,
             x="DATE",
-            y=numeric_cols[0],
+            y=qty_col,
             markers=True,
-            title="Monthly Trend"
+            title="Monthly Gas Trend"
         )
+        st.plotly_chart(fig_line, use_container_width=True)
 
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.dataframe(daily, use_container_width=True)
+st.divider()
+st.subheader("📄 Raw Data")
+st.dataframe(df, use_container_width=True)
