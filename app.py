@@ -298,8 +298,7 @@ if monthly_totals:
     month_df = pd.concat(monthly_totals)
     month_df = month_df.dropna(subset=["DATE"])
 
-    month_df["MONTH"] = month_df["DATE"].dt.to_period("M")
-
+    month_df["MONTH"] = month_df["DATE"].dt.to_period("M").dt.to_timestamp()
     month_summary = month_df.groupby("MONTH").sum(numeric_only=True).reset_index()
 
     if "SALE AMOUNT" in month_summary.columns:
