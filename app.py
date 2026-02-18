@@ -8,6 +8,30 @@ import plotly.express as px
 # PAGE CONFIG
 # =====================================================
 st.set_page_config(page_title="Performance Dashboard", layout="wide")
+# =====================================================
+# CUSTOM KPI STYLING
+# =====================================================
+st.markdown("""
+<style>
+.kpi-card {
+    background: linear-gradient(135deg, #1f2937, #111827);
+    padding: 20px;
+    border-radius: 18px;
+    box-shadow: 0px 4px 20px rgba(0,0,0,0.15);
+    text-align: center;
+}
+.kpi-title {
+    font-size: 14px;
+    color: #9ca3af;
+    margin-bottom: 8px;
+}
+.kpi-value {
+    font-size: 26px;
+    font-weight: bold;
+    color: white;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # =====================================================
 # GOOGLE AUTH
