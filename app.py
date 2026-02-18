@@ -53,7 +53,7 @@ credentials = Credentials.from_service_account_info(
 client = gspread.authorize(credentials)
 
 # =====================================================
-# LOAD FUNCTIONS
+# LOAD FUNCTIONS (UNCHANGED)
 # =====================================================
 @st.cache_data
 def list_spreadsheets():
@@ -118,26 +118,71 @@ selected_date = st.sidebar.selectbox(
     worksheets
 )
 
-# ---------------------------
-# DATE RANGE FILTER
-# ---------------------------
 st.sidebar.markdown("### 📅 Date Range Selection")
 date_range = st.sidebar.date_input("Select Date Range", [])
 
-df = load_consolidated(spreadsheet_id, selected_date)
+# =====================================================
+# CONSOLIDATED DATA LOGIC
+# =====================================================
+def get_dashboard_df(spreadsheet_id, worksheets, selected_date, date_range):
+
+    # ✅ If date range selected → consolidate all sheets
+    if len(date_range) == 2:
+        start_date, end_date = date_range
+        all_data = []
+
+        for sheet in worksheets:
+            try:
+                sheet_date = pd.to_datetime(sheet, errors="coerce")
+
+                if pd.notna(sheet_date):
+                    if start_date <= sheet_date.date() <= end_date:
+                        temp_df = load_consolidated(spreadsheet_id, sheet)
+                        if temp_df is not None:
+                            all_data.append(temp_df)
+            except:
+                continue
+
+        if all_data:
+            combined = pd.concat(all_data)
+
+            # 🔥 Group by SHIFT and sum numeric columns
+            combined_summary = (
+                combined.groupby("SHIFT")
+                .sum(numeric_only=True)
+                .reset_index()
+            )
+
+            return combined_summary
+
+    # ✅ Otherwise load selected single sheet
+    return load_consolidated(spreadsheet_id, selected_date)
+
+
+# Get main dataframe
+df = get_dashboard_df(
+    spreadsheet_id,
+    worksheets,
+    selected_date,
+    date_range
+)
 
 if df is None or df.empty:
-    st.error("Could not load data.")
+    st.error("No data available for selection.")
     st.stop()
 
 # =====================================================
 # HEADER
 # =====================================================
 st.title("📊 Performance Dashboard")
-st.subheader(f"{selected_month} | {selected_date}")
+
+if len(date_range) == 2:
+    st.subheader(f"{selected_month} | Consolidated View")
+else:
+    st.subheader(f"{selected_month} | {selected_date}")
 
 # =====================================================
-# SAFE COLUMN ACCESS
+# KPI SECTION
 # =====================================================
 if "TOTAL" not in df["SHIFT"].values:
     st.error("TOTAL row not found.")
@@ -156,9 +201,6 @@ def kpi_card(title, value):
         </div>
     """, unsafe_allow_html=True)
 
-# =====================================================
-# PROFESSIONAL KPI SECTION
-# =====================================================
 st.subheader("🔢 Overall Performance")
 
 row1 = st.columns(4)
@@ -191,42 +233,6 @@ with row2[3]:
 st.divider()
 
 # =====================================================
-# RANGE CONSOLIDATION
-# =====================================================
-if len(date_range) == 2:
-    start_date, end_date = date_range
-
-    all_data = []
-
-    for sheet in worksheets:
-        try:
-            sheet_date = pd.to_datetime(sheet, errors="coerce")
-            if pd.notna(sheet_date):
-                if start_date <= sheet_date.date() <= end_date:
-                    temp_df = load_consolidated(spreadsheet_id, sheet)
-                    if temp_df is not None:
-                        total = temp_df[temp_df["SHIFT"] == "TOTAL"]
-                        if not total.empty:
-                            total["DATE"] = sheet_date
-                            all_data.append(total)
-        except:
-            continue
-
-    if all_data:
-        range_summary = pd.concat(all_data)
-        agg = range_summary.sum(numeric_only=True)
-
-        st.subheader("📊 Consolidated Range Analysis")
-
-        cols = st.columns(4)
-        cols[0].metric("Range Sale", f"₹ {agg.get('SALE AMOUNT',0):,.2f}")
-        cols[1].metric("Range Collection", f"₹ {agg.get('TOTAL COLLECTION',0):,.2f}")
-        cols[2].metric("Range Credit", f"₹ {agg.get('CREDIT SALE',0):,.2f}")
-        cols[3].metric("Range Difference", f"₹ {agg.get('DIFF',0):,.2f}")
-
-        st.divider()
-
-# =====================================================
 # SHIFT TABLE
 # =====================================================
 st.subheader("📋 Shift Performance")
@@ -236,6 +242,7 @@ st.dataframe(df, use_container_width=True)
 # SALE BY SHIFT
 # =====================================================
 st.subheader("📊 Sale Amount by Shift")
+
 shift_df = df[df["SHIFT"] != "TOTAL"]
 
 if "SALE AMOUNT" in df.columns:
@@ -275,4 +282,3 @@ if not payment_df.empty:
         hole=0.5
     )
     st.plotly_chart(fig2, use_container_width=True)
-
