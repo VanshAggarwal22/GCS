@@ -276,36 +276,3 @@ if not payment_df.empty:
     )
     st.plotly_chart(fig2, use_container_width=True)
 
-# =====================================================
-# MONTH WISE ANALYSIS
-# =====================================================
-st.subheader("📈 Month Wise Analysis")
-
-monthly_totals = []
-
-for sheet in worksheets:
-    try:
-        temp_df = load_consolidated(spreadsheet_id, sheet)
-        if temp_df is not None:
-            total = temp_df[temp_df["SHIFT"] == "TOTAL"]
-            if not total.empty:
-                total["DATE"] = pd.to_datetime(sheet, errors="coerce")
-                monthly_totals.append(total)
-    except:
-        continue
-
-if monthly_totals:
-    month_df = pd.concat(monthly_totals)
-    month_df = month_df.dropna(subset=["DATE"])
-
-    month_df["MONTH"] = month_df["DATE"].dt.to_period("M").dt.to_timestamp()
-    month_summary = month_df.groupby("MONTH").sum(numeric_only=True).reset_index()
-
-    if "SALE AMOUNT" in month_summary.columns:
-        fig_month = px.line(
-            month_summary,
-            x="MONTH",
-            y="SALE AMOUNT",
-            markers=True
-        )
-        st.plotly_chart(fig_month, use_container_width=True)
