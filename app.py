@@ -294,3 +294,58 @@ if not payment_df.empty:
         hole=0.5
     )
     st.plotly_chart(fig2, use_container_width=True)
+
+# =====================================================
+# 🚨 ALERT PAGE – NEGATIVE DIFFERENCE TRACKER
+# =====================================================
+st.divider()
+st.title("🚨 Negative Difference Alerts")
+
+alert_data = []
+
+for file_name, file_id in spreadsheets.items():
+    try:
+        ws_list = list_worksheets(file_id)
+
+        for sheet in ws_list:
+            try:
+                sheet_date = pd.to_datetime(
+                    sheet.strip(),
+                    dayfirst=True,
+                    errors="coerce"
+                )
+
+                if pd.notna(sheet_date):
+
+                    temp_df = load_consolidated(file_id, sheet)
+
+                    if temp_df is not None and "TOTAL" in temp_df["SHIFT"].values:
+
+                        total_row = temp_df[temp_df["SHIFT"] == "TOTAL"].iloc[0]
+
+                        if "DIFF" in temp_df.columns:
+                            diff_value = total_row["DIFF"]
+
+                            if diff_value < 0:
+                                alert_data.append({
+                                    "Month File": file_name,
+                                    "Date": sheet_date.date(),
+                                    "Difference": diff_value
+                                })
+
+            except:
+                continue
+
+    except:
+        continue
+
+
+if alert_data:
+    alert_df = pd.DataFrame(alert_data).sort_values("Date")
+
+    st.error("⚠ Negative differences detected!")
+
+    st.dataframe(alert_df, use_container_width=True)
+
+else:
+    st.success("✅ No negative differences found across all data.")
