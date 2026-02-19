@@ -345,16 +345,16 @@ if alert_data:
 
     st.error("⚠ Negative differences detected!")
 
-# Highlight rows where Difference < -500
-def highlight_diff(val):
-    if val < -500:
-        return "background-color: #7f1d1d; color: white;"
-    return ""
-
-styled_df = alert_df.style.applymap(
-    highlight_diff,
-    subset=["Difference"]
-)
+    # Highlight rows where Difference < -500
+    def highlight_diff(val):
+        if val < -500:
+            return "background-color: #7f1d1d; color: white;"
+        return ""
+    
+    styled_df = alert_df.style.applymap(
+        highlight_diff,
+        subset=["Difference"]
+    )
 
 st.dataframe(styled_df, use_container_width=True)
 else:
