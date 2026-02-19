@@ -356,6 +356,6 @@ if alert_data:
         subset=["Difference"]
     )
 
-st.dataframe(styled_df, use_container_width=True)
+    st.dataframe(styled_df, use_container_width=True)
 else:
     st.success("✅ No negative differences found across all data.")
