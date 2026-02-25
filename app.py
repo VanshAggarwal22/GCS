@@ -35,42 +35,58 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # =====================================================
-# GOOGLE AUTH
+# GOOGLE AUTH (OPTIMIZED)
 # =====================================================
-scope = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
+@st.cache_resource
+def get_gspread_client():
+    scope = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
 
-service_account_info = dict(st.secrets["gcp_service_account"])
-service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
+    try:
+        service_account_info = dict(st.secrets["gcp_service_account"])
+        service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
 
-credentials = Credentials.from_service_account_info(
-    service_account_info,
-    scopes=scope
-)
+        credentials = Credentials.from_service_account_info(
+            service_account_info,
+            scopes=scope
+        )
+        return gspread.authorize(credentials)
+    except Exception as e:
+        st.error(f"Authentication failed: {e}")
+        st.stop()
 
-client = gspread.authorize(credentials)
+client = get_gspread_client()
 
 # =====================================================
-# LOAD FUNCTIONS (UNCHANGED)
+# LOAD FUNCTIONS (OPTIMIZED)
 # =====================================================
-@st.cache_data
+@st.cache_data(ttl=600)
 def list_spreadsheets():
-    files = client.list_spreadsheet_files()
-    return {file["name"]: file["id"] for file in files}
+    try:
+        files = client.list_spreadsheet_files()
+        return {file["name"]: file["id"] for file in files}
+    except Exception:
+        return {}
 
-@st.cache_data
+@st.cache_data(ttl=600)
 def list_worksheets(spreadsheet_id):
-    spreadsheet = client.open_by_key(spreadsheet_id)
-    return [ws.title for ws in spreadsheet.worksheets()]
+    try:
+        spreadsheet = client.open_by_key(spreadsheet_id)
+        return [ws.title for ws in spreadsheet.worksheets()]
+    except Exception:
+        return []
 
-@st.cache_data
+@st.cache_data(ttl=600)
 def load_consolidated(spreadsheet_id, worksheet_name):
-    spreadsheet = client.open_by_key(spreadsheet_id)
-    worksheet = spreadsheet.worksheet(worksheet_name)
-
-    data = worksheet.get("AA6:AJ14")
+    try:
+        spreadsheet = client.open_by_key(spreadsheet_id)
+        worksheet = spreadsheet.worksheet(worksheet_name)
+        data = worksheet.get("AA6:AJ14")
+    except Exception as e:
+        st.error(f"Error loading worksheet {worksheet_name}: {e}")
+        return None
 
     if not data:
         return None
@@ -215,32 +231,24 @@ def kpi_card(title, value):
 
 st.subheader("🔢 Overall Performance")
 
-row1 = st.columns(4)
-row2 = st.columns(4)
+kpi_data = [
+    ("Total Quantity", "QTY", f"{safe_get('QTY'):,.2f}"),
+    ("Total Sale", "SALE AMOUNT", f"₹ {safe_get('SALE AMOUNT'):,.2f}"),
+    ("Total Cash", "CASH", f"₹ {safe_get('CASH'):,.2f}"),
+    ("Total Paytm", "PAYTM", f"₹ {safe_get('PAYTM'):,.2f}"),
+    ("Total ATM", "ATM", f"₹ {safe_get('ATM'):,.2f}"),
+    ("Total Credit", "CREDIT SALE", f"₹ {safe_get('CREDIT SALE'):,.2f}"),
+    ("Total Collection", "TOTAL COLLECTION", f"₹ {safe_get('TOTAL COLLECTION'):,.2f}"),
+    ("Difference", "DIFF", f"₹ {safe_get('DIFF'):,.2f}"),
+]
 
-with row1[0]:
-    kpi_card("Total Quantity", f"{safe_get('QTY'):,.2f}")
-
-with row1[1]:
-    kpi_card("Total Sale", f"₹ {safe_get('SALE AMOUNT'):,.2f}")
-
-with row1[2]:
-    kpi_card("Total Cash", f"₹ {safe_get('CASH'):,.2f}")
-
-with row1[3]:
-    kpi_card("Total Paytm", f"₹ {safe_get('PAYTM'):,.2f}")
-
-with row2[0]:
-    kpi_card("Total ATM", f"₹ {safe_get('ATM'):,.2f}")
-
-with row2[1]:
-    kpi_card("Total Credit", f"₹ {safe_get('CREDIT SALE'):,.2f}")
-
-with row2[2]:
-    kpi_card("Total Collection", f"₹ {safe_get('TOTAL COLLECTION'):,.2f}")
-
-with row2[3]:
-    kpi_card("Difference", f"₹ {safe_get('DIFF'):,.2f}")
+for i in range(0, len(kpi_data), 4):
+    cols = st.columns(4)
+    for j in range(4):
+        if i + j < len(kpi_data):
+            title, col_name, value = kpi_data[i + j]
+            with cols[j]:
+                kpi_card(title, value)
 
 st.divider()
 
@@ -296,66 +304,55 @@ if not payment_df.empty:
     st.plotly_chart(fig2, use_container_width=True)
 
 # =====================================================
-# 🚨 ALERT PAGE – NEGATIVE DIFFERENCE TRACKER
+# 🚨 ALERT PAGE – NEGATIVE DIFFERENCE TRACKER (OPTIMIZED)
 # =====================================================
 st.divider()
 st.title("🚨 Negative Difference Alerts")
 
-alert_data = []
+@st.cache_data(ttl=3600)  # Cache alert results for 1 hour
+def get_all_negative_alerts(spreadsheets_dict):
+    alerts = []
+    for file_name, file_id in spreadsheets_dict.items():
+        try:
+            ws_titles = list_worksheets(file_id)
+            for title in ws_titles:
+                try:
+                    sheet_date = pd.to_datetime(title.strip(), dayfirst=True, errors="coerce")
+                    if pd.isna(sheet_date):
+                        continue
 
-for file_name, file_id in spreadsheets.items():
-    try:
-        ws_list = list_worksheets(file_id)
-
-        for sheet in ws_list:
-            try:
-                sheet_date = pd.to_datetime(
-                    sheet.strip(),
-                    dayfirst=True,
-                    errors="coerce"
-                )
-
-                if pd.notna(sheet_date):
-
-                    temp_df = load_consolidated(file_id, sheet)
-
-                    if temp_df is not None and "TOTAL" in temp_df["SHIFT"].values:
-
-                        total_row = temp_df[temp_df["SHIFT"] == "TOTAL"].iloc[0]
-
-                        if "DIFF" in temp_df.columns:
-                            diff_value = total_row["DIFF"]
-
-                            if diff_value < 0:
-                                alert_data.append({
+                    # load_consolidated is already cached
+                    t_df = load_consolidated(file_id, title)
+                    if t_df is not None and "TOTAL" in t_df["SHIFT"].values:
+                        t_row = t_df[t_df["SHIFT"] == "TOTAL"].iloc[0]
+                        if "DIFF" in t_df.columns:
+                            d_val = t_row["DIFF"]
+                            if d_val < 0:
+                                alerts.append({
                                     "Month File": file_name,
                                     "Date": sheet_date.date(),
-                                    "Difference": diff_value
+                                    "Difference": d_val
                                 })
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return alerts
 
-            except:
-                continue
-
-    except:
-        continue
-
-
-if alert_data:
-    alert_df = pd.DataFrame(alert_data).sort_values("Date")
-
-    st.error("⚠ Negative differences detected!")
-
-    # Highlight rows where Difference < -500
-    def highlight_diff(val):
-        if val < -500:
-            return "background-color: #7f1d1d; color: white;"
-        return ""
+with st.expander("🔍 Run Global Scan for Negative Differences", expanded=False):
+    st.info("Scanning all spreadsheets for negative 'DIFF' values. This may take a moment...")
     
-    styled_df = alert_df.style.applymap(
-        highlight_diff,
-        subset=["Difference"]
-    )
+    alert_results = get_all_negative_alerts(spreadsheets)
 
-    st.dataframe(styled_df, use_container_width=True)
-else:
-    st.success("✅ No negative differences found across all data.")
+    if alert_results:
+        alert_df = pd.DataFrame(alert_results).sort_values("Date")
+        st.error(f"⚠ {len(alert_results)} Negative differences detected!")
+
+        def highlight_diff(val):
+            return "background-color: #7f1d1d; color: white;" if val < -500 else "color: #f87171;" if val < 0 else ""
+        
+        # Using .map instead of .applymap for future-proofing
+        styled_df = alert_df.style.map(highlight_diff, subset=["Difference"])
+        st.dataframe(styled_df, use_container_width=True)
+    else:
+        st.success("✅ No negative differences found across all scanned data.")
